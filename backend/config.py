@@ -1,0 +1,174 @@
+# backend/config.py
+from pydantic_settings import BaseSettings
+from pathlib import Path
+from typing import Dict
+from backend.vector_store.models import StoreEngine
+import os
+import json
+
+
+def get_env_file_path():
+    """Get the path to the .env file in the base directory"""
+    home_dir = os.path.expanduser("~")
+    base_dir = os.path.join(home_dir, ".config", "inquisitive")
+
+    Path(base_dir).mkdir(parents=True, exist_ok=True)
+
+    env_file_path = os.path.join(base_dir, "backend.env")
+
+    if not os.path.exists(env_file_path):
+        with open(env_file_path, 'w') as f:
+            f.write("# Backend environment variables for personal knowledge base\n")
+
+    return env_file_path
+
+
+# It is possible to override all the defaults values
+# by specifying env variables or adding variables in backend.env.
+# However, if we decide to override default directory locations
+# then we need to make sure that one needs to create
+# all the relevant directories and sub-directories manually.
+# Data layout under BASE_DIR (default: ~/.config/inquisitive):
+#   uploads/  logs/  inquisitive.db  lance_db/
+class Settings(BaseSettings):
+    # BASIC SERVER SETTINGS
+    SERVER_HOST: str = "0.0.0.0"
+    SERVER_PORT: int = 8000
+    SERVER_LOG_LEVEL: str = "debug"
+
+    OLLAMA_HOST: str = "http://0.0.0.0:11434"
+
+    # BASIC DIRECTORY CREATION
+    HOME_DIR: str = os.path.expanduser("~")
+    CONFIG_DIR: str = os.path.join(HOME_DIR, ".config")
+    CONFIG_DIR_PATH: Path = Path(CONFIG_DIR)
+    CONFIG_DIR_PATH.mkdir(exist_ok=True)
+
+    BASE_DIR: str = os.path.join(CONFIG_DIR, "inquisitive")
+    BASE_DIR_PATH: Path = Path(BASE_DIR)
+    BASE_DIR_PATH.mkdir(exist_ok=True)
+
+    UPLOAD_DIR: str = os.path.join(BASE_DIR, "uploads")
+    UPLOAD_DIR_PATH: Path = Path(UPLOAD_DIR)
+    UPLOAD_DIR_PATH.mkdir(exist_ok=True)
+
+    LOGS_DIR: str = os.path.join(BASE_DIR, "logs")
+    LOGS_DIR_PATH: Path = Path(LOGS_DIR)
+    LOGS_DIR_PATH.mkdir(exist_ok=True)
+
+    LOG_FILE_NAME: str = os.path.join(LOGS_DIR, "backend.log")
+
+    # Keep local machines usable; override via backend.env if needed
+    LINKS_JOB_QUEUE_CONCURRENCY: int = 8
+    FILES_JOB_QUEUE_CONCURRENCY: int = 4
+
+    # Durable job runner
+    JOB_WORKER_CONCURRENCY: int = 6
+    JOB_MAX_ATTEMPTS: int = 3
+    JOB_POLL_INTERVAL_SECONDS: float = 2.0
+    # Re-queue jobs stuck in "running" longer than this (seconds)
+    JOB_STALE_SECONDS: int = 30 * 60
+
+    # Upload safety (backend enforcement; FE whitelist should stay in sync)
+    ALLOWED_UPLOAD_EXTENSIONS: list[str] = [
+        "txt", "pdf", "md", "json", "sh", "markdown",
+        "docx", "pptx", "csv",
+    ]
+    MAX_UPLOAD_BYTES: int = 25 * 1024 * 1024  # 25 MiB
+
+    # Sqlite Path
+    SQLITE_DB_PATH: str = os.path.join(BASE_DIR, "inquisitive.db")
+
+    # Vector store path
+    CHROMA_VECTOR_STORE_PERSISTS_DIRECTORY: str = os.path.join(
+        BASE_DIR, "chroma_db")
+    MILVUS_VECTOR_STORE_URL: str = os.path.join(BASE_DIR, "milvus_data.db")
+    LANCE_DB_VECTOR_STORE_PERSISTS_DIRECTOY: str = os.path.join(
+        BASE_DIR, "lance_db")
+
+    # Default vector database
+    DEFAULT_VECTOR_DB: str = StoreEngine.LANCE
+
+    VECTOR_STORE_COLLECTION_NAME: str = "document_store"
+
+    # Modify and use different embedding model if needed
+    # Note: For cloud demonstration, use EMBEDDINGS_DIMENSION=1024 when EMBEDDINGS_MODEL="bge-m3"
+    EMBEDDINGS_MODEL: str = "chroma/all-minilm-l6-v2-f32"
+    EMBEDDINGS_DIMENSION: int = 384
+    
+    # Dual Provider Settings (B0)
+    EMBEDDING_PROVIDER: str = "ollama"
+    CHAT_PROVIDER: str = "ollama"
+    EMBEDDING_API_BASE: str = ""
+    EMBEDDING_API_KEY: str = ""
+    CHAT_API_BASE: str = ""
+    CHAT_API_KEY: str = ""
+    CHAT_MODEL: str = ""
+
+    TEXT_SPLITTER_CHUNK_SIZE:  int = 1500
+    TEXT_SPLITTER_CHUNK_OVERLAP:  int = 150
+
+    # Modify if needed to use other relational DB
+    DATABASE_URL: str = f"sqlite+aiosqlite:///{SQLITE_DB_PATH}"
+
+    # JWT settings
+    # In production, use a secure key
+    SECRET_KEY: str = "YOUR_SECRET_KEY_CHANGE_THIS"
+    RESET_PASSWORD_TOKEN_SECRET: str = "YOUR_SECRET_KEY_CHANGE_THIS"
+    VERIFICATION_TOKEN_SECRET: str = "YOUR_SECRET_KEY_CHANGE_THIS"
+    JWT_ALGORITHM: str = "HS256"
+    JWT_EXPIRATION_MINUTES: int = 60 * 24  # 1 day (override in backend.env if needed)
+    JWT_TOKEN_AUDIENCE: str = "fastapi-users:auth"
+
+    # CORS settings
+    # Streamlit UI default port
+    CORS_ORIGINS: list[str] = ["http://localhost:8501"]
+    WINDOW_SIZE_MULTIPLIER: int = 10
+    DEFAULT_HEADERS: Dict[str, str] = {
+        "User-Agent": "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:136.0) Gecko/20100101 Firefox/136.0",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5"
+    }
+
+    LOGGER_NAME: str = "knowledge_base_backend"
+    LOG_FORMAT: str = "<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>"
+    LOG_LEVEL: str = "INFO"
+
+    class Config:
+        env_file = get_env_file_path()
+        env_file_encoding = 'utf-8'
+
+        @classmethod
+        def parse_env_var(cls, field_name, raw_val):
+            if field_name == "DEFAULT_HEADERS":
+                try:
+                    return json.loads(raw_val)
+                except json.JSONDecodeError:
+                    return {}
+            elif field_name == "CORS_ORIGINS":
+                try:
+                    return json.loads(raw_val)
+                except json.JSONDecodeError:
+                    return [item.strip() for item in raw_val.split(',')]
+            elif field_name == "ALLOWED_UPLOAD_EXTENSIONS":
+                try:
+                    return json.loads(raw_val)
+                except json.JSONDecodeError:
+                    return [item.strip().lstrip('.') for item in raw_val.split(',') if item.strip()]
+            return raw_val
+
+
+settings = Settings()
+
+
+def is_insecure_default_secret() -> bool:
+    insecure = {
+        "YOUR_SECRET_KEY_CHANGE_THIS",
+        "change-me",
+        "secret",
+    }
+    return (
+        settings.SECRET_KEY in insecure
+        or settings.RESET_PASSWORD_TOKEN_SECRET in insecure
+        or settings.VERIFICATION_TOKEN_SECRET in insecure
+    )

@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "inquisitive"
+version = "0.1.0"
+description = "自托管个人知识库：笔记/文件/链接 CRUD、异步向量化与 RAG 流式对话"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "GNU Affero General Public License v3 (AGPLv3)"}
+authors = [
+    {name = "Lanzao"}
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: GNU Affero General Public License v3",
+    "Operating System :: OS Independent",
+]
+dynamic = ["dependencies"]
+
+[project.scripts]
+inquisitive-start-backend = "backend.main:start_server"
+inquisitive-start-ui = "start.launcher:start_frontend_separately"
+inquisitive-start = "start.launcher:main"
+
+[tool.setuptools.dynamic]
+dependencies = {file = ["requirements.txt"]}
+
+[tool.setuptools]
+packages = [
+    "backend",
+    "backend.api",
+    "backend.api.routers",
+    "backend.api.services",
+    "backend.core",
+    "backend.parsers",
+    "backend.vector_store",
+    "backend.worker",
+    "frontend",
+    "frontend.streamlit_component",
+    "frontend.streamlit_component.easymde",
+    "frontend.streamlit_component.easymde.frontend",
+    "start"
+]

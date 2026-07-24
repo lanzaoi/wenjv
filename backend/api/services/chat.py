@@ -87,6 +87,54 @@ async def stream_ollama_chat(
                     break
 
 
+async def stream_openai_chat(
+    *,
+    model: str,
+    messages: List[Dict[str, str]],
+) -> AsyncIterator[str]:
+    api_key = getattr(settings, "CHAT_API_KEY", "")
+    api_base = getattr(settings, "CHAT_API_BASE", "").rstrip("/")
+    if not api_key:
+        raise ValueError(f"Missing CHAT_API_KEY for CHAT_PROVIDER={getattr(settings, 'CHAT_PROVIDER', '')}.")
+
+    if api_base.endswith("/chat/completions"):
+        url = api_base
+    else:
+        url = f"{api_base}/chat/completions"
+    payload = {
+        "model": getattr(settings, "CHAT_MODEL", "") or model,
+        "messages": messages,
+        "stream": True,
+    }
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    
+    async with httpx.AsyncClient(timeout=None) as client:
+        async with client.stream("POST", url, json=payload, headers=headers) as resp:
+            if resp.status_code == 401:
+                raise ValueError("Unauthorized (401) for CHAT_PROVIDER. Check your API key.")
+            resp.raise_for_status()
+            async for line in resp.aiter_lines():
+                line = line.strip()
+                if not line or not line.startswith("data: "):
+                    continue
+                data_str = line[6:]
+                if data_str == "[DONE]":
+                    break
+                try:
+                    data = json.loads(data_str)
+                    choices = data.get("choices", [])
+                    if choices:
+                        delta = choices[0].get("delta", {})
+                        content = delta.get("content")
+                        if content:
+                            yield content
+                except json.JSONDecodeError:
+                    continue
+
+
 async def rag_chat_events(
     *,
     question: str,
@@ -144,7 +192,13 @@ async def rag_chat_events(
         messages = build_messages(
             question=question, context=context, history=history
         )
-        async for token in stream_ollama_chat(model=model, messages=messages):
+        chat_provider = getattr(settings, "CHAT_PROVIDER", "ollama").lower()
+        if chat_provider == "ollama":
+            stream_gen = stream_ollama_chat(model=model, messages=messages)
+        else:
+            stream_gen = stream_openai_chat(model=model, messages=messages)
+
+        async for token in stream_gen:
             yield {"type": "token", "content": token}
         yield {"type": "done"}
     except Exception as e:

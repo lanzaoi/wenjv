@@ -1,6 +1,6 @@
-from langchain_ollama import OllamaEmbeddings
-from langchain.schema import Document
+from backend.core.embedder import get_embedder
 from pymilvus import MilvusClient, DataType
+from langchain.schema import Document
 import json
 import uuid
 from backend.config import settings
@@ -15,8 +15,7 @@ from backend.api.models import SourceType
 logger = get_logger()
 
 # Initialize embeddings
-embeddings = OllamaEmbeddings(
-    model=settings.EMBEDDINGS_MODEL, base_url=settings.OLLAMA_HOST)
+embeddings = get_embedder()
 
 db_path = settings.MILVUS_VECTOR_STORE_URL
 

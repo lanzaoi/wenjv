@@ -1,4 +1,4 @@
-from langchain_ollama import OllamaEmbeddings
+from backend.core.embedder import get_embedder
 from langchain.schema import Document
 import lancedb
 import uuid
@@ -15,8 +15,7 @@ import pyarrow as pa
 logger = get_logger()
 
 # Initialize embeddings
-embeddings = OllamaEmbeddings(
-    model=settings.EMBEDDINGS_MODEL, base_url=settings.OLLAMA_HOST)
+embeddings = get_embedder()
 
 # Initialize LanceDB
 db = lancedb.connect(settings.LANCE_DB_VECTOR_STORE_PERSISTS_DIRECTOY)

@@ -69,7 +69,12 @@ async def chat_rag(
 
 @chat_router.get("/models")
 async def list_ollama_models(user: User = Depends(current_active_user)):
-    """Best-effort list of local Ollama models."""
+    """Best-effort list of local Ollama models (or fallback for cloud provider)."""
+    chat_provider = getattr(settings, "CHAT_PROVIDER", "ollama").lower()
+    if chat_provider != "ollama":
+        model = getattr(settings, "CHAT_MODEL", "")
+        return {"models": [model] if model else []}
+
     import httpx
 
     url = settings.OLLAMA_HOST.rstrip("/") + "/api/tags"

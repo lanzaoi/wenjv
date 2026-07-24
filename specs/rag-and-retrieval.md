@@ -35,11 +35,12 @@ PPTX：允许「按幻灯片抽文本」的务实实现；增强（备注/表格
 - 改参数必须考虑：**旧向量不自动迁移**，需重建或版本化 collection。  
 - 未来可按类型分配置（text/pdf/pptx 不同 size）；未配置前保持简单。
 
-## 4. Embedding
+## 4. Embedding 与 Chat Provider
 
-- 模型与 **维度** 必须一致（配置项成对修改）。  
-- 更换 embedding 模型 ≈ **重建向量库**。  
-- 调用可经 LangChain 薄封装；业务编排不依赖 LangChain Agent。
+- 推理后端目前支持配置化双路（Ollama 与 OpenAI 兼容 API），详见配置 `EMBEDDING_PROVIDER` 与 `CHAT_PROVIDER`。
+- 模型与 **维度** 必须一致（配置项成对修改，例如 bge-m3 必须配 1024）。  
+- 更换 embedding 模型或云提供商 ≈ **重建向量库**，不要混用旧的维度数据。
+- 调用可经薄封装或内置 HTTP 客户端拉流；业务编排不依赖 LangChain Agent 框架。
 
 ## 5. 检索
 

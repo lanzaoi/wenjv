@@ -11,6 +11,7 @@
 - 多格式解析（务实级别）  
 - 用户隔离的语义检索  
 - 后端 RAG 对话（SSE + citations）  
+- 推理后端可配置（Ollama / 云兼容 API）
 - Streamlit 可用 UI  
 - 规范与可评估的演进（specs + plans + eval）
 

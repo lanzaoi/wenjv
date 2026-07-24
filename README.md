@@ -71,25 +71,29 @@ FastAPI (:8000)
 ## 环境要求
 
 - Python **3.11+**
-- 本机已安装并可访问 **Ollama**
-- 建议有一定内存；有 GPU 时 7B 级对话模型体验更好
+- 默认推理演示使用 **云端兼容服务**（如 SiliconFlow + DeepSeek），也支持完全本地切换至 **Ollama**。
 
-### Ollama 模型示例
+### 1. 云服务推理（推荐默认）
+
+您需要准备好符合 OpenAI 接口规范的 API Keys，推荐组合：
+- **Embedding**：SiliconFlow (bge-m3 等)
+- **Chat**：DeepSeek (deepseek-chat 等)
+
+> **⚠️ 维度警告：**
+> 云端 `bge-m3` 的向量维度为 `1024`。若要使用此模型，必须在环境中同步配置 `EMBEDDINGS_DIMENSION=1024`，并配合**全新的向量库目录**使用。不要将 `1024` 维的数据与默认的 `384` 维混合，否则会引发严重检索错误。
+
+### 2. Ollama 本地推理（可选）
+
+如需纯本地运行，请安装并启动 Ollama：
 
 ```bash
-# Embedding（与默认配置维度 384 对应；可按需更换）
+# 默认配置下对应的 Embedding 模型（维度 384）：
 ollama pull chroma/all-minilm-l6-v2-f32:latest
 
-# 对话模型（任选其一或更多，前端可切换）
+# 对话模型：
 ollama pull mistral:7b-instruct-q4_0
-# 轻量示例：
-# ollama pull gemma3:4b
-# ollama pull deepseek-r1:1.5b
-
 ollama serve
 ```
-
-Embedding 模型名与维度请在 `backend/config.py` 或 `backend.env` 中保持一致。
 
 ---
 
@@ -177,14 +181,16 @@ SECRET_KEY=请换成足够长的随机串
 
 | 变量 | 含义 |
 |------|------|
-| `SECRET_KEY` | JWT 密钥 |
-| `OLLAMA_HOST` | Ollama 地址，如 `http://127.0.0.1:11434` |
+| `SECRET_KEY` | JWT 密钥，防止安全泄漏必备 |
+| `EMBEDDING_PROVIDER` | `openai_compatible` 或 `ollama` 等 |
+| `CHAT_PROVIDER` | `openai_compatible` 或 `ollama` 等 |
+| `EMBEDDING_API_KEY` / `CHAT_API_KEY` | 对应云服务的鉴权密钥 |
+| `EMBEDDINGS_MODEL` / `EMBEDDINGS_DIMENSION` | 嵌入模型名称与**强绑定**的维度 |
+| `CHAT_MODEL` | 对话大模型名称 |
+| `OLLAMA_HOST` | Ollama 本地地址（若开启） |
 | `DEFAULT_VECTOR_DB` | 向量后端（默认 Lance） |
-| `EMBEDDINGS_MODEL` / `EMBEDDINGS_DIMENSION` | 嵌入模型与维度 |
 | `ALLOWED_UPLOAD_EXTENSIONS` | 允许上传的扩展名 |
 | `MAX_UPLOAD_BYTES` | 单文件大小上限 |
-| `JOB_WORKER_CONCURRENCY` / `JOB_MAX_ATTEMPTS` | 任务并发与重试 |
-| `CORS_ORIGINS` | 前端来源（JSON 或逗号分隔） |
 | 前端 `API_URL` | Streamlit 访问后端的地址 |
 
 默认值见 `backend/config.py`、`frontend/config.py`。  

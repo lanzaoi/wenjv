@@ -31,8 +31,8 @@ def main():
         show_register_page()
     elif st.session_state.current_page == "logout":
         logout_user()
-        st.success("You have been logged out successfully!")
-        if st.button("Click here to Login again"):
+        st.success("您已成功退出登录！")
+        if st.button("点击此处重新登录"):
             show_login_page()
     else:
         show_login_page()

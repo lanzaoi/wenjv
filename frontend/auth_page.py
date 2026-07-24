@@ -32,19 +32,19 @@ def login_user(email, password):
 
                 save_token_to_storage(token, email)
 
-                return True, "Login successful"
+                return True, "登录成功"
 
-            return False, "Invalid token received"
+            return False, "收到无效的鉴权 Token"
 
-        return False, f"Login failed: {response.text}"
+        return False, f"登录失败: {response.text}"
     except Exception as e:
-        return False, f"Login error: {str(e)}"
+        return False, f"登录出错: {str(e)}"
 
 
 def register_user(email, password):
     """Register a new user with just email and password"""
     if not settings.ALLOW_AUTO_USER_REGISTER:
-        return False, "Registration not allowed. Please contact the Admin"
+        return False, "系统当前不允许自行注册，请联系管理员"
     try:
         response = requests.post(
             f"{settings.API_URL}/auth/register",
@@ -52,11 +52,11 @@ def register_user(email, password):
         )
 
         if response.status_code == 201:
-            return True, "Registration successful"
+            return True, "注册成功"
 
-        return False, f"Registration failed: {response.text}"
+        return False, f"注册失败: {response.text}"
     except Exception as e:
-        return False, f"Registration error: {str(e)}"
+        return False, f"注册出错: {str(e)}"
 
 
 def logout_user():
@@ -74,12 +74,12 @@ def logout_user():
 
 
 def show_login_page():
-    st.title("Login")
+    st.title("登录")
 
     with st.form("login_form"):
-        email = st.text_input("Email")
-        password = st.text_input("Password", type="password")
-        submit = st.form_submit_button("Login")
+        email = st.text_input("邮箱")
+        password = st.text_input("密码", type="password")
+        submit = st.form_submit_button("登录")
 
         if submit:
             if email and password:
@@ -90,28 +90,28 @@ def show_login_page():
                 else:
                     st.error(message)
             else:
-                st.warning("Please enter both email and password")
+                st.warning("请输入邮箱和密码")
 
     st.markdown("---")
-    st.write("Don't have an account?")
-    if st.button("Register"):
+    st.write("还没有账号？")
+    if st.button("立即注册"):
         navigate_to("register")
 
 
 def show_register_page():
-    st.title("Register")
+    st.title("注册")
 
     with st.form("register_form"):
-        email = st.text_input("Email")
-        password = st.text_input("Password", type="password")
-        confirm_password = st.text_input("Confirm Password", type="password")
-        submit = st.form_submit_button("Register")
+        email = st.text_input("邮箱")
+        password = st.text_input("密码", type="password")
+        confirm_password = st.text_input("确认密码", type="password")
+        submit = st.form_submit_button("注册")
 
         if submit:
             if not (email and password and confirm_password):
-                st.warning("Please fill out all fields")
+                st.warning("请填写所有字段")
             elif password != confirm_password:
-                st.warning("Passwords do not match")
+                st.warning("两次输入的密码不一致")
             else:
                 success, message = register_user(email, password)
                 if success:
@@ -121,6 +121,6 @@ def show_register_page():
                     st.error(message)
 
     st.markdown("---")
-    st.write("Already have an account?")
-    if st.button("Login"):
+    st.write("已经有账号了？")
+    if st.button("返回登录"):
         navigate_to("login")

@@ -49,6 +49,7 @@ def load_token_from_storage():
                     st.session_state.token = token
                     st.session_state.username = username
                     st.session_state.authenticated = True
+                    st.session_state.current_page = 'rag'
                     return True
         except Exception as e:
             print(f"Error loading token: {e}")
@@ -88,7 +89,7 @@ def navigate_to(page):
 
 def upload_file_to_api_server(uploaded_file):
     headers = {
-        "Authorization": f"Bearer {st.session_state.token}"
+        "Authorization": f"Bearer {st.session_state.get('token')}"
     }
 
     # Create a files dictionary for the request
@@ -105,13 +106,13 @@ def upload_file_to_api_server(uploaded_file):
         result = response.json()
         return True, result["filename"]
     else:
-        st.error(f"Upload failed: {response.text}")
+        st.error(f"上传失败: {response.text}")
         return False, uploaded_file.name
 
 
 def upload_note_to_api_server(content, title):
     headers = {
-        "Authorization": f"Bearer {st.session_state.token}",
+        "Authorization": f"Bearer {st.session_state.get('token')}",
         "Content-Type": "application/json"
     }
 
@@ -129,16 +130,16 @@ def upload_note_to_api_server(content, title):
 
     if response.status_code == 202:
         result = response.json()
-        st.success("Note Submitted successfully!")
+        st.success("笔记提交成功！")
         return result["url"]
     else:
-        st.error(f"Upload failed: {response.text}")
+        st.error(f"上传失败: {response.text}")
         return title
 
 
 def update_note_to_api_server(content, file_url):
     headers = {
-        "Authorization": f"Bearer {st.session_state.token}",
+        "Authorization": f"Bearer {st.session_state.get('token')}",
         "Content-Type": "application/json"
     }
 
@@ -156,13 +157,13 @@ def update_note_to_api_server(content, file_url):
     if response.status_code == 200:
         return True
 
-    st.error(f"Update failed: {response.text}")
+    st.error(f"更新失败: {response.text}")
     return False
 
 
 def submit_link(link, custom_headers):
     headers = {
-        "Authorization": f"Bearer {st.session_state.token}",
+        "Authorization": f"Bearer {st.session_state.get('token')}",
         "Content-Type": "application/json"
     }
 
@@ -180,13 +181,13 @@ def submit_link(link, custom_headers):
     if response.status_code == 202:
         return True
 
-    st.error("failed to submit link")
+    st.error("提交链接失败")
     return False
 
 
 def submit_bulk_links(links, custom_headers):
     headers = {
-        "Authorization": f"Bearer {st.session_state.token}",
+        "Authorization": f"Bearer {st.session_state.get('token')}",
         "Content-Type": "application/json"
     }
 
@@ -204,13 +205,13 @@ def submit_bulk_links(links, custom_headers):
     if response.status_code == 202:
         return True
 
-    st.error("failed to submit links")
+    st.error("批量提交链接失败")
     return False
 
 
 def submit_recursive_crawl_link(link, custom_headers):
     headers = {
-        "Authorization": f"Bearer {st.session_state.token}",
+        "Authorization": f"Bearer {st.session_state.get('token')}",
         "Content-Type": "application/json"
     }
 
@@ -228,13 +229,13 @@ def submit_recursive_crawl_link(link, custom_headers):
     if response.status_code == 202:
         return True
 
-    st.error("failed to submit links")
+    st.error("提交抓取任务失败")
     return False
 
 
 def fetch_documents(prompt):
     headers = {
-        "Authorization": f"Bearer {st.session_state.token}",
+        "Authorization": f"Bearer {st.session_state.get('token')}",
         "Content-Type": "application/json"
     }
 
@@ -265,7 +266,7 @@ def fetch_documents(prompt):
 def fetch_chat_models():
     """List Ollama models via backend (preferred over direct FE→Ollama)."""
     headers = {
-        "Authorization": f"Bearer {st.session_state.token}",
+        "Authorization": f"Bearer {st.session_state.get('token')}",
     }
     try:
         response = requests.get(
@@ -287,27 +288,36 @@ def stream_backend_chat(
     model=None,
     use_rag: bool = True,
     history=None,
+    token: str = None,
+    context_window_size: int = 5,
+    include_selected: list = None,
+    exclude_selected: list = None,
+    source_type: str = None,
 ):
     """
     Stream SSE events from POST /chat.
     Yields dicts: {type: citations|token|error|done, ...}
     """
+    if not token:
+        yield {"type": "error", "message": "未找到登录信息，请刷新页面重新登录。"}
+        return
+
     headers = {
-        "Authorization": f"Bearer {st.session_state.token}",
+        "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
         "Accept": "text/event-stream",
     }
     payload = {
         "question": question,
         "model": model,
-        "window_size": st.session_state.get("context_window_size", 5),
-        "include_sources": st.session_state.get("include_selected") or None,
-        "exclude_sources": st.session_state.get("exclude_selected") or None,
+        "window_size": context_window_size,
+        "include_sources": include_selected or None,
+        "exclude_sources": exclude_selected or None,
         "use_rag": use_rag,
         "history": history or [],
     }
-    if st.session_state.get("source_type"):
-        payload["source_type"] = st.session_state.source_type
+    if source_type:
+        payload["source_type"] = source_type
 
     with requests.post(
         f"{settings.API_URL}/chat",
@@ -360,7 +370,7 @@ def citations_to_docs(citations):
 
 def fetch_notes(skip=0, limit=100):
     headers = {
-        "Authorization": f"Bearer {st.session_state.token}",
+        "Authorization": f"Bearer {st.session_state.get('token')}",
         "Content-Type": "application/json"
     }
 
@@ -382,7 +392,7 @@ def fetch_notes(skip=0, limit=100):
 
 def fetch_links(skip=0, limit=100):
     headers = {
-        "Authorization": f"Bearer {st.session_state.token}",
+        "Authorization": f"Bearer {st.session_state.get('token')}",
         "Content-Type": "application/json"
     }
 
@@ -404,7 +414,7 @@ def fetch_links(skip=0, limit=100):
 
 def fetch_files(skip=0, limit=100):
     headers = {
-        "Authorization": f"Bearer {st.session_state.token}",
+        "Authorization": f"Bearer {st.session_state.get('token')}",
         "Content-Type": "application/json"
     }
 
@@ -426,7 +436,7 @@ def fetch_files(skip=0, limit=100):
 
 def sync_notes():
     headers = {
-        "Authorization": f"Bearer {st.session_state.token}",
+        "Authorization": f"Bearer {st.session_state.get('token')}",
         "Content-Type": "application/json"
     }
 
@@ -447,7 +457,7 @@ def sync_notes():
 
 def fetch_file(file_url):
     headers = {
-        "Authorization": f"Bearer {st.session_state.token}"
+        "Authorization": f"Bearer {st.session_state.get('token')}"
     }
 
     response = requests.get(
@@ -463,7 +473,7 @@ def fetch_file(file_url):
 
 def fetch_file_status(filename):
     headers = {
-        "Authorization": f"Bearer {st.session_state.token}"
+        "Authorization": f"Bearer {st.session_state.get('token')}"
     }
 
     response = requests.get(
@@ -480,7 +490,7 @@ def fetch_file_status(filename):
 
 def delete_file(filename):
     headers = {
-        "Authorization": f"Bearer {st.session_state.token}"
+        "Authorization": f"Bearer {st.session_state.get('token')}"
     }
 
     response = requests.delete(
@@ -497,7 +507,7 @@ def delete_file(filename):
 
 def delete_note(filename):
     headers = {
-        "Authorization": f"Bearer {st.session_state.token}"
+        "Authorization": f"Bearer {st.session_state.get('token')}"
     }
 
     response = requests.delete(
@@ -514,7 +524,7 @@ def delete_note(filename):
 
 def delete_link(link_id):
     headers = {
-        "Authorization": f"Bearer {st.session_state.token}"
+        "Authorization": f"Bearer {st.session_state.get('token')}"
     }
 
     response = requests.delete(

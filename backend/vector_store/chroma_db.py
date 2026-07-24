@@ -1,6 +1,5 @@
 from langchain_chroma import Chroma
-from langchain_ollama import OllamaEmbeddings
-from langchain.schema import Document
+from backend.core.embedder import get_embedder
 from backend.config import settings
 from backend.core.logging import get_logger
 from backend.core.utils import (
@@ -12,8 +11,7 @@ from backend.api.models import SourceType
 logger = get_logger()
 
 # Initialize embeddings
-embeddings = OllamaEmbeddings(
-    model=settings.EMBEDDINGS_MODEL, base_url=settings.OLLAMA_HOST)
+embeddings = get_embedder()
 persist_directory = settings.CHROMA_VECTOR_STORE_PERSISTS_DIRECTORY
 
 # Initialize Chroma vector store

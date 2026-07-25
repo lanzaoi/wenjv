@@ -381,6 +381,8 @@ Answer: """
                 if st.session_state.exclude_selected:
                     st.info(
                         f"已排除引用: {','.join(st.session_state.exclude_selected)}", icon="ℹ️")
+                if references:
+                    st.caption("ℹ️ 注：引用中的 `距离` (distance) 为向量引擎原生排序分，通常越小越相关，请勿当作百分比看待。")
 
                 for i, ref in enumerate(references, 1):
                     if ref["filename"]:
@@ -397,7 +399,7 @@ Answer: """
                     else:
                         expand = (i == 1)
                     with st.expander(
-                        f"引用 {i} (得分: {ref['score']:.2f}, 页码: {ref['page']})",
+                        f"[{ref.get('source_type', 'doc')}] 引用 {i}: {src} (距离: {ref.get('score', 0):.2f}, 页码: {ref.get('page', '')})",
                         expanded=expand
                     ):
                         st.session_state.right_sidebar_rendered = True

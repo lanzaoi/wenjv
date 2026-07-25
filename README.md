@@ -274,9 +274,8 @@ pytest tests/test_smoke_architecture.py -q
 ## 已知限制
 
 - 扫描件 / 纯图片 PDF 无 OCR，可能抽取为空并标记失败  
-- 向量库返回的 `score` 为引擎原生距离，**不要直接当成 0–1 相似度百分比**  
-- 递归 crawl 仍为实验能力  
-- hybrid 检索 / rerank、Vue 门面、docker-compose 等见路线图待办  
+- 向量库返回的 `score`（前端展示为“距离”）为引擎原生距离分（Distance），通常越小代表越相关，**切勿直接当成 0–1 相似度百分比**。
+- **Hybrid 检索 (合成方案)**：默认关闭 (`HYBRID_SEARCH_ENABLED=false`)。采用「向量主 + 词法辅」架构，词法检索支持 `fts5` 或 `like`，并通过等权 RRF (w_v=1.0, w_k=1.0, k=5) 融合重排。进入 RRF 前，向量距离大于设定的最大阈值（默认 0.8）的文档会被直接抛弃。需要使用 `backend/worker/fts5_backfill.py` 进行历史数据 backfill，FTS5 不可用或未命中时，默认退回纯向量。由于 RRF 的分数叠加，混合检索开启时输出的距离量纲可能与纯 Lance 向量不同。仅当专有名词召回率显著提升，且长尾语义不掉级时，才建议在生产环境开启。
 
 ---
 
@@ -301,3 +300,11 @@ Copyright (C) 2026 Lanzao
 5. 在聊天中提问，侧栏出现引用，回答为流式输出  
 
 祝用得顺利。
+
+## 配置与行为说明
+
+- **拒答行为 (Refusal)**：默认开启 (`RAG_REFUSE_ON_EMPTY=true`)。当启用 RAG 且检索未能命中任何知识库片段时，系统将直接返回“库中未找到相关依据”的提示，而不会调用大模型进行无根据的推演或幻觉生成。
+
+## 评测 (Eval)
+
+为了评估 RAG 的真实质量，请参考 [eval/README.md](eval/README.md) 使用黄金测试集进行打分。

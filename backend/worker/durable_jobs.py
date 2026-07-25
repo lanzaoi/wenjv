@@ -247,6 +247,60 @@ async def _execute_document(session: AsyncSession, job: IngestionJob, payload: d
     await _mark_resource_status(session, job, ProcessingStatus.IN_PROGRESS, None)
     await session.commit()
 
+    from backend.parsers import parse_document
+    from backend.config import settings
+    from backend.core.ocr_client import ocr_image_bytes
+    from backend.core.pdf_render import render_pdf_pages
+    import os
+
+    # 1. Parse document first
+    parsed = await asyncio.to_thread(parse_document, file_path)
+    total_chars = sum(len(c.text or "") for c in parsed)
+    
+    # 2. Check if OCR is needed
+    ocr_mode = getattr(settings, "OCR_MODE", "off")
+    need_ocr = False
+    
+    if ocr_mode == "always":
+        need_ocr = True
+    elif ocr_mode == "auto":
+        ocr_min_chars = getattr(settings, "OCR_MIN_CHARS", 40)
+        if total_chars < ocr_min_chars:
+            need_ocr = True
+
+    # 3. Apply OCR if needed and it's a PDF
+    if need_ocr and file_name.lower().endswith(".pdf"):
+        try:
+            max_pages = getattr(settings, "OCR_MAX_PAGES", 30)
+            png_bytes_list = await asyncio.to_thread(render_pdf_pages, file_path, max_pages)
+            
+            ocr_texts = []
+            for png in png_bytes_list:
+                text = await ocr_image_bytes(png)
+                if text:
+                    ocr_texts.append(text)
+                    
+            if ocr_texts:
+                combined_ocr = "\n\n".join(ocr_texts)
+                original_text = "\n\n".join((c.text or "") for c in parsed)
+                final_text = original_text + "\n\n---\n\n" + combined_ocr
+                
+                # Write to a temporary markdown file to avoid re-parsing as PDF
+                temp_file = file_path + ".ocr.md"
+                def _write_temp():
+                    with open(temp_file, "w", encoding="utf-8") as f:
+                        f.write(final_text)
+                await asyncio.to_thread(_write_temp)
+                
+                # Redirect file_path so load_and_chunk_document treats it as markdown
+                file_path = temp_file
+                
+        except Exception as e:
+            logger.error(f"OCR failed for {file_name}: {e}")
+            await _mark_resource_failed(session, job, f"OCR extraction failed: {str(e)}")
+            return
+
+    # 4. Finally pass to vector store
     await asyncio.to_thread(
         vector_store.add_uploaded_document_content_to_vector_store,
         file_path,

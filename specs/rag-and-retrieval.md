@@ -35,7 +35,17 @@ PPTX：允许「按幻灯片抽文本」的务实实现；增强（备注/表格
 - 改参数必须考虑：**旧向量不自动迁移**，需重建或版本化 collection。  
 - 未来可按类型分配置（text/pdf/pptx 不同 size）；未配置前保持简单。
 
-## 4. Embedding 与 Chat Provider
+## 4. Hybrid (合成方案)
+
+- **默认关闭** (`HYBRID_SEARCH_ENABLED=false`)，未开启或未完成 backfill 时默认依赖纯向量或 LIKE。
+- **检索路线**：采用「向量主 + 词法辅」架构。
+- **L2 词法后端** (HYBRID_KEYWORD_BACKEND)：支持 `fts5` (默认) 或 `like`。不再包含 `fts5_then_like` 拼接策略。
+- **L3 融合重排**：采用等权 RRF (Weighted RRF)，默认权重 `w_v=1.0, w_k=1.0`（$k=5$）。进入 RRF 前，向量距离大于最大阈值的文档会被直接抛弃。
+- **注意**：FTS 不可用时会安全退回纯向量。混合检索开启时，由于 RRF 分数叠加，最终输出的 score 与纯 Lance 向量的 distance 量纲可能不同（RRF 输出越大越好）。
+- **同步要求**：使用 FTS5 需运行 `backend/worker/fts5_backfill.py` 脚本；增量入库会自动双写。
+- **效果门禁**：仅当专有名词召回率显著提升，且长尾语义不掉级时才建议在生产环境默认开启。
+
+## 5. Embedding 与 Chat Provider
 
 - 推理后端目前支持配置化双路（Ollama 与 OpenAI 兼容 API），详见配置 `EMBEDDING_PROVIDER` 与 `CHAT_PROVIDER`。
 - 模型与 **维度** 必须一致（配置项成对修改，例如 bge-m3 必须配 1024）。  
@@ -73,7 +83,7 @@ PPTX：允许「按幻灯片抽文本」的务实实现；增强（备注/表格
 ## 8. 质量与拒答
 
 - 有 RAG 时优先 **带 citations**。  
-- 无命中：倾向拒答或明确「库中无依据」，避免一本正经瞎编。  
+- 无命中：系统会触发硬拒答（默认 `RAG_REFUSE_ON_EMPTY=true`），直接返回无依据提示，避免大模型一本正经瞎编。
 - 评估：使用 `eval/` + 脚本对比改动前后（见 `.hermes/plans` 中 G0/G1）。
 
 ## 9. 使用频率加权

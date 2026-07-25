@@ -102,14 +102,16 @@ class DocumentSearchRequest(schemas.BaseModel):
 
 
 class DocumentMetadata(schemas.BaseModel):
-    source: str
-    page: str
-    source_type: str
-    belongs_to: str
+    source: Optional[str] = None
+    page: Optional[str] = None
+    source_type: Optional[str] = None
+    belongs_to: Optional[str] = None
+    id: Optional[str] = None
     title: Optional[str] = None
     link_id: Optional[str] = None
     file_id: Optional[str] = None
     filename: Optional[str] = None
+    user_id: Optional[str] = None
 
 
 class DocumentResult(schemas.BaseModel):

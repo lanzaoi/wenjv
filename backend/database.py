@@ -52,12 +52,21 @@ def _ensure_sqlite_columns(connection):
                 )
 
 
+from backend.core.fts5_utils import create_fts5_table
+
 def create_db_and_tables():
     Base.metadata.create_all(sync_engine)
     with sync_engine.begin() as conn:
         # Only SQLite needs this simple path; other DBs should use real migrations later.
         if sync_engine.dialect.name == "sqlite":
             _ensure_sqlite_columns(conn)
+    
+    if sync_engine.dialect.name == "sqlite":
+        raw_conn = sync_engine.raw_connection()
+        try:
+            create_fts5_table(raw_conn)
+        finally:
+            raw_conn.close()
 
 # Get async session
 

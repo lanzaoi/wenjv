@@ -142,6 +142,30 @@ def add_documents(documents):
     # Insert data into Milvus
     milvus_client.insert(collection_name=COLLECTION_NAME, data=data)
     logger.info(f"Added {len(documents)} documents to Milvus collection")
+    
+    # Sync to FTS5
+    try:
+        from backend.database import sync_engine
+        from backend.core.fts5_utils import insert_fts5
+        with sync_engine.connect() as conn:
+            raw_conn = conn.connection.dbapi_connection
+            for entity in data:
+                try:
+                    insert_fts5(
+                        raw_conn,
+                        chunk_id=entity["id"],
+                        title=entity.get("title", ""),
+                        filename=entity.get("filename", ""),
+                        page_content=entity.get("page_content", ""),
+                        user_id=entity.get("user_id"),
+                        source_type=entity.get("source_type", ""),
+                        link_id=entity.get("link_id"),
+                        belongs_to=entity.get("belongs_to", "")
+                    )
+                except Exception as e:
+                    logger.error(f"FTS dual write failed for chunk_id {entity['id']}: {e}")
+    except Exception as e:
+        logger.error(f"FTS dual write connection failed in milvus add_documents: {e}")
 
 
 def add_link_content_to_vector_store(
@@ -290,6 +314,17 @@ def remove_documents(filename, username):
         if result and result.get('delete_count', 0) > 0:
             logger.info(
                 f"Removed {result.get('delete_count', 0)} documents with filename={filename} belonging to user={username}")
+                
+            # Sync remove to FTS5
+            try:
+                from backend.database import sync_engine
+                from backend.core.fts5_utils import delete_by_filename
+                with sync_engine.connect() as conn:
+                    raw_conn = conn.connection.dbapi_connection
+                    delete_by_filename(raw_conn, filename, belongs_to=username)
+            except Exception as e:
+                logger.error(f"FTS dual remove failed in milvus remove_documents: {e}")
+                
             return True
         else:
             logger.warning(
@@ -316,6 +351,17 @@ def remove_link_documents(link_id, username):
         if result and result.get('delete_count', 0) > 0:
             logger.info(
                 f"Removed {result.get('delete_count', 0)} documents with link_id={link_id} belonging to user={username}")
+                
+            # Sync remove to FTS5
+            try:
+                from backend.database import sync_engine
+                from backend.core.fts5_utils import delete_by_link_id
+                with sync_engine.connect() as conn:
+                    raw_conn = conn.connection.dbapi_connection
+                    delete_by_link_id(raw_conn, link_id, belongs_to=username)
+            except Exception as e:
+                logger.error(f"FTS dual remove failed in milvus remove_link_documents: {e}")
+                
             return True
         else:
             logger.warning(

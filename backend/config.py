@@ -1,5 +1,6 @@
 # backend/config.py
 from pydantic_settings import BaseSettings
+from pydantic import model_validator
 from pathlib import Path
 from typing import Dict
 from backend.vector_store.models import StoreEngine
@@ -76,6 +77,14 @@ class Settings(BaseSettings):
     ]
     MAX_UPLOAD_BYTES: int = 25 * 1024 * 1024  # 25 MiB
 
+    @model_validator(mode="after")
+    def extend_upload_extensions(self) -> "Settings":
+        if self.OCR_MODE != "off":
+            for ext in ["png", "jpg", "jpeg"]:
+                if ext not in self.ALLOWED_UPLOAD_EXTENSIONS:
+                    self.ALLOWED_UPLOAD_EXTENSIONS.append(ext)
+        return self
+
     # Sqlite Path
     SQLITE_DB_PATH: str = os.path.join(BASE_DIR, "inquisitive.db")
 
@@ -104,6 +113,47 @@ class Settings(BaseSettings):
     CHAT_API_BASE: str = ""
     CHAT_API_KEY: str = ""
     CHAT_MODEL: str = ""
+
+    # RAG Refusal settings
+    RAG_REFUSE_ON_EMPTY: bool = True
+    
+    # Hybrid Search Settings (Y2+)
+    HYBRID_SEARCH_ENABLED: bool = False
+    HYBRID_KEYWORD_BACKEND: str = "fts5"  # fts5 | like
+    HYBRID_VECTOR_MAX_DISTANCE: float = 0.8
+    HYBRID_RRF_K: int = 5
+    HYBRID_RRF_WEIGHT_VECTOR: float = 1.0
+    HYBRID_RRF_WEIGHT_KEYWORD: float = 1.0
+
+    # ---- 1.2 RAG Depth ----
+
+    # Rerank (cross-encoder)
+    RERANK_ENABLED: bool = False
+    RERANK_PROVIDER: str = "siliconflow"
+    RERANK_API_BASE: str = ""
+    RERANK_API_KEY: str = ""
+    RERANK_MODEL: str = "BAAI/bge-reranker-v2-m3"
+    RERANK_CANDIDATES: int = 20
+    RERANK_TIMEOUT_SECONDS: int = 8
+
+    # MMR
+    MMR_ENABLED: bool = True
+    MMR_LAMBDA: float = 0.7
+
+    # Structured Recall
+    STRUCTURED_RECALL_ENABLED: bool = True
+    HYBRID_RRF_WEIGHT_STRUCTURED: float = 1.0
+    STRUCTURED_RECALL_LIMIT: int = 20
+
+    # OCR (AI Studio v2 async)
+    OCR_MODE: str = "off"
+    OCR_PROVIDER: str = "aistudio"
+    OCR_AISTUDIO_ACCESS_TOKEN: str = ""
+    OCR_API_BASE: str = "https://paddleocr.aistudio-app.com/api/v2/ocr"
+    OCR_MODEL: str = "PaddleOCR-VL-1.6"
+    OCR_MIN_CHARS: int = 40
+    OCR_MAX_PAGES: int = 30
+    OCR_TIMEOUT_SECONDS: int = 120
 
     TEXT_SPLITTER_CHUNK_SIZE:  int = 1500
     TEXT_SPLITTER_CHUNK_OVERLAP:  int = 150

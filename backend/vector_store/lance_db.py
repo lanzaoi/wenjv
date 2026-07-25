@@ -48,7 +48,8 @@ def initialize_collection():
             pa.field("user_id", pa.string()),
             pa.field("link_id", pa.string()),
             pa.field("file_id", pa.string()),
-            pa.field("source_type", pa.string())
+            pa.field("source_type", pa.string()),
+            pa.field("resource_id", pa.string())
         ])
 
         # Create empty table with schema
@@ -158,7 +159,7 @@ def add_documents(documents):
 
         # Ensure common fields exist
         for field in ["source", "page", "title", "filename", "belongs_to",
-                      "link_id", "file_id", "source_type", "user_id"]:
+                      "link_id", "file_id", "source_type", "user_id", "resource_id"]:
             if field not in entity:
                 entity[field] = None
 
@@ -172,6 +173,31 @@ def add_documents(documents):
     logger.info(f"Added {len(documents)} documents to LanceDB table")
     # Deferred ANN index (no-op under min_rows)
     ensure_vector_ann_index(table)
+
+    # Sync to FTS5
+    try:
+        from backend.database import sync_engine
+        from backend.core.fts5_utils import insert_fts5
+        with sync_engine.connect() as conn:
+            raw_conn = conn.connection.dbapi_connection
+            for entity in data:
+                try:
+                    insert_fts5(
+                        raw_conn,
+                        chunk_id=entity["id"],
+                        title=entity.get("title", ""),
+                        filename=entity.get("filename", ""),
+                        page_content=entity.get("page_content", ""),
+                        user_id=entity.get("user_id"),
+                        source_type=entity.get("source_type", ""),
+                        link_id=entity.get("link_id"),
+                        belongs_to=entity.get("belongs_to", ""),
+                        resource_id=entity.get("resource_id"),
+                    )
+                except Exception as e:
+                    logger.error(f"FTS dual write failed for chunk_id {entity['id']}: {e}")
+    except Exception as e:
+        logger.error(f"FTS dual write connection failed in add_documents: {e}")
 
 
 def add_link_content_to_vector_store(
@@ -189,6 +215,7 @@ def add_link_content_to_vector_store(
                 "belongs_to": username,
                 "user_id": str(user_id) if user_id is not None else None,
                 "link_id": f"{link_id}",
+                "resource_id": str(link_id) if link_id is not None else None,
                 "source_type": SourceType.LINK
             }
         ) for i, text in enumerate(texts)
@@ -218,6 +245,7 @@ def add_uploaded_document_content_to_vector_store(
                 "belongs_to": username,
                 "user_id": str(user_id) if user_id is not None else None,
                 "file_id": f"{file_id}",
+                "resource_id": str(file_id) if file_id is not None else None,
                 "source_type": source_type
             }
         ) for content_dict in texts
@@ -250,11 +278,14 @@ def fetch_documents(
 
     # Build filter expression for LanceDB
     # Prefer stable user_id when column exists; keep belongs_to for legacy rows
+    # NOTE: LanceDB 0.21.2 has a bug where string `= 'value'` returns 0 rows;
+    # `LIKE '%value%'` works. Use LIKE as a workaround (safe for integer-string IDs).
     if user_id is not None and "user_id" in names:
         uid = _escape_filter_value(str(user_id))
         email = _escape_filter_value(username)
+        # Use LIKE workaround for LanceDB 0.21.2 string comparison bug
         filter_conditions = [
-            f"(user_id = '{uid}' OR (user_id IS NULL AND belongs_to = '{email}') OR belongs_to = '{email}')"
+            f"(user_id LIKE '%{uid}%' OR belongs_to = '{email}')"
         ]
     else:
         filter_conditions = [f"belongs_to = '{_escape_filter_value(username)}'"]
@@ -305,7 +336,7 @@ def fetch_documents(
     for _, row in search_results.iterrows():
         # Create metadata dictionary
         metadata = {k: v for k, v in row.items()
-                    if k not in ['vector', 'page_content', 'id'] and v is not None}
+                    if k not in ['vector', 'page_content'] and v is not None}
 
         # Create Document object
         doc = Document(
@@ -318,6 +349,142 @@ def fetch_documents(
 
     logger.info(f"Found {len(docs_with_scores)} relevant documents")
     return docs_with_scores
+
+
+def fetch_documents_keyword(
+        include_selected,
+        exclude_selected,
+        window_size,
+        username,
+        prompt,
+        source_type=None,
+        user_id=None):
+    """Fallback keyword search for Hybrid Y1"""
+    if source_type == 'link':
+        window_size_modified = window_size * settings.WINDOW_SIZE_MULTIPLIER
+    else:
+        window_size_modified = window_size
+
+    table = db.open_table(TABLE_NAME)
+    names = _schema_names(table)
+
+    if user_id is not None and "user_id" in names:
+        uid = _escape_filter_value(str(user_id))
+        email = _escape_filter_value(username)
+        filter_conditions = [
+            f"(user_id LIKE '%{uid}%' OR belongs_to = '{email}')"
+        ]
+    else:
+        filter_conditions = [f"belongs_to = '{_escape_filter_value(username)}'"]
+
+    if exclude_selected and len(exclude_selected) > 0:
+        exclude_conditions = [f"source != '{_escape_filter_value(s)}'" for s in exclude_selected]
+        filter_conditions.append("(" + " AND ".join(exclude_conditions) + ")")
+
+    if include_selected and len(include_selected) > 0:
+        include_conditions = [f"source = '{_escape_filter_value(s)}'" for s in include_selected]
+        filter_conditions.append("(" + " OR ".join(include_conditions) + ")")
+
+    if source_type is not None:
+        filter_conditions.append(f"source_type = '{_escape_filter_value(source_type)}'")
+
+    # Keyword condition (simple LIKE on title, filename, page_content)
+    # Strip whitespace and escape SQL LIKE wildcards % and _
+    clean_prompt = _escape_filter_value(prompt.strip())
+    clean_prompt = clean_prompt.replace("%", "\\%").replace("_", "\\_")
+    
+    kw_conditions = []
+    for term in clean_prompt.split():
+        if term:
+            # We don't have standard ESCAPE in lance sql string easily if it doesn't support it, 
+            # but usually it's fine. Wait, does lance datafusion support ESCAPE? 
+            # Actually, simply stripping them or replacing them is safer if ESCAPE '\' fails.
+            # Let's just remove % and _ from the prompt entirely to be safe and avoid injection.
+            safe_term = term.replace("\\%", "").replace("\\_", "")
+            if safe_term:
+                kw_conditions.append(f"(page_content LIKE '%{safe_term}%' OR title LIKE '%{safe_term}%' OR filename LIKE '%{safe_term}%')")
+    
+    if kw_conditions:
+        filter_conditions.append("(" + " AND ".join(kw_conditions) + ")")
+    else:
+        # If no valid terms, return empty
+        return []
+
+    filter_expr = " AND ".join(filter_conditions)
+    logger.info(f"LanceDB Keyword filter expression: {filter_expr}")
+
+    search_results = table.search(None).where(filter_expr).limit(window_size_modified).to_pandas()
+
+    docs_with_scores = []
+    for _, row in search_results.iterrows():
+        metadata = {k: v for k, v in row.items() if k not in ['vector', 'page_content'] and v is not None}
+        doc = Document(page_content=row['page_content'], metadata=metadata)
+        # Keyword matches get a fixed "distance" (0.0 means perfect match in distance terms)
+        # We just need them ordered, we'll assign 0.0, the RRF will rely on their position
+        docs_with_scores.append((doc, 0.0))
+
+    return docs_with_scores
+
+def fetch_documents_by_resource(resource_id: int, source_type: str, user_id=None, username=None):
+    """
+    Fetch chunks from LanceDB by resource_id (or fallback to file_id/link_id for old data).
+    Returns: list of (Document, score) where score = 0.0
+    """
+    try:
+        table = db.open_table(TABLE_NAME)
+        names = _schema_names(table)
+        
+        filter_conditions = []
+        if user_id is not None and "user_id" in names:
+            uid = _escape_filter_value(str(user_id))
+            email = _escape_filter_value(username) if username else ""
+            if email:
+                filter_conditions.append(f"(user_id LIKE '%{uid}%' OR belongs_to = '{email}')")
+            else:
+                filter_conditions.append(f"user_id LIKE '%{uid}%'")
+        elif username:
+            filter_conditions.append(f"belongs_to = '{_escape_filter_value(username)}'")
+            
+        rid = _escape_filter_value(str(resource_id))
+        
+        fallback = ""
+        if source_type == "link" and "link_id" in names:
+            fallback = f" OR link_id LIKE '%{rid}%'"
+        elif source_type in ("file", "note") and "file_id" in names:
+            # Notes and files both fell back to file_id in some legacy structures, or just file_id for file
+            fallback = f" OR file_id LIKE '%{rid}%'"
+            
+        if "resource_id" in names:
+            res_cond = f"(resource_id LIKE '%{rid}%'{fallback})"
+        else:
+            if fallback:
+                res_cond = fallback[4:] # strip " OR "
+            else:
+                # No way to filter
+                return []
+                
+        filter_conditions.append(res_cond)
+        
+        if source_type and "source_type" in names:
+            filter_conditions.append(f"source_type = '{source_type}'")
+            
+        filter_expr = " AND ".join(filter_conditions)
+        logger.info(f"LanceDB fetch_by_resource filter: {filter_expr}")
+        
+        # limit(1000) is just a safety cap for chunks per resource
+        search_results = table.search(None).where(filter_expr).limit(1000).to_pandas()
+        
+        docs_with_scores = []
+        for _, row in search_results.iterrows():
+            metadata = {k: v for k, v in row.items() if k not in ['vector', 'page_content'] and v is not None}
+            doc = Document(page_content=row['page_content'], metadata=metadata)
+            docs_with_scores.append((doc, 0.0))
+            
+        return docs_with_scores
+    except Exception as e:
+        logger.error(f"Error fetching documents by resource: {e}")
+        return []
+
 
 
 def remove_documents(filename, username):
@@ -337,6 +504,17 @@ def remove_documents(filename, username):
         if count_before > 0:
             logger.info(
                 f"Removed {count_before} documents with filename={filename} belonging to user={username}")
+                
+            # Sync remove to FTS5
+            try:
+                from backend.database import sync_engine
+                from backend.core.fts5_utils import delete_by_filename
+                with sync_engine.connect() as conn:
+                    raw_conn = conn.connection.dbapi_connection
+                    delete_by_filename(raw_conn, filename, belongs_to=username)
+            except Exception as e:
+                logger.error(f"FTS dual remove failed in remove_documents: {e}")
+                
             return True
         else:
             logger.warning(
@@ -366,6 +544,17 @@ def remove_link_documents(link_id, username):
         if count_before > 0:
             logger.info(
                 f"Removed {count_before} documents with filename={link_id} belonging to user={username}")
+                
+            # Sync remove to FTS5
+            try:
+                from backend.database import sync_engine
+                from backend.core.fts5_utils import delete_by_link_id
+                with sync_engine.connect() as conn:
+                    raw_conn = conn.connection.dbapi_connection
+                    delete_by_link_id(raw_conn, link_id, belongs_to=username)
+            except Exception as e:
+                logger.error(f"FTS dual remove failed in remove_link_documents: {e}")
+                
             return True
         else:
             logger.warning(

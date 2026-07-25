@@ -40,8 +40,32 @@ def add_link_content_to_vector_store(
         ) for i, text in enumerate(texts)
     ]
 
-    vector_store.add_documents(documents=documents)
+    ids = vector_store.add_documents(documents=documents)
     logger.info(f"processed: {source} with {title}")
+    
+    # Sync to FTS5
+    try:
+        from backend.database import sync_engine
+        from backend.core.fts5_utils import insert_fts5
+        with sync_engine.connect() as conn:
+            raw_conn = conn.connection.dbapi_connection
+            for doc, doc_id in zip(documents, ids):
+                try:
+                    insert_fts5(
+                        raw_conn,
+                        chunk_id=doc_id,
+                        title=doc.metadata.get("title", ""),
+                        filename=doc.metadata.get("filename", ""),
+                        page_content=doc.page_content,
+                        user_id=doc.metadata.get("user_id"),
+                        source_type=doc.metadata.get("source_type", ""),
+                        link_id=doc.metadata.get("link_id"),
+                        belongs_to=doc.metadata.get("belongs_to", "")
+                    )
+                except Exception as e:
+                    logger.error(f"FTS dual write failed for chunk_id {doc_id}: {e}")
+    except Exception as e:
+        logger.error(f"FTS dual write connection failed in chroma add_link_content: {e}")
 
 
 def add_uploaded_document_content_to_vector_store(
@@ -68,8 +92,32 @@ def add_uploaded_document_content_to_vector_store(
         ) for content_dict in texts
     ]
 
-    vector_store.add_documents(documents=documents)
+    ids = vector_store.add_documents(documents=documents)
     logger.info(f"processed: {file_name} with id={file_id}")
+    
+    # Sync to FTS5
+    try:
+        from backend.database import sync_engine
+        from backend.core.fts5_utils import insert_fts5
+        with sync_engine.connect() as conn:
+            raw_conn = conn.connection.dbapi_connection
+            for doc, doc_id in zip(documents, ids):
+                try:
+                    insert_fts5(
+                        raw_conn,
+                        chunk_id=doc_id,
+                        title=doc.metadata.get("title", ""),
+                        filename=doc.metadata.get("filename", ""),
+                        page_content=doc.page_content,
+                        user_id=doc.metadata.get("user_id"),
+                        source_type=doc.metadata.get("source_type", ""),
+                        link_id=doc.metadata.get("link_id"),
+                        belongs_to=doc.metadata.get("belongs_to", "")
+                    )
+                except Exception as e:
+                    logger.error(f"FTS dual write failed for chunk_id {doc_id}: {e}")
+    except Exception as e:
+        logger.error(f"FTS dual write connection failed in chroma add_uploaded_document: {e}")
 
 
 def fetch_documents(
@@ -172,6 +220,17 @@ def remove_documents(filename, username):
             vector_store.delete(ids=matching_docs['ids'])
             logger.info(
                 f"Removed documents with filename={filename} belonging to user={username}")
+                
+            # Sync remove to FTS5
+            try:
+                from backend.database import sync_engine
+                from backend.core.fts5_utils import delete_by_filename
+                with sync_engine.connect() as conn:
+                    raw_conn = conn.connection.dbapi_connection
+                    delete_by_filename(raw_conn, filename, belongs_to=username)
+            except Exception as e:
+                logger.error(f"FTS dual remove failed in chroma remove_documents: {e}")
+                
             return True
         else:
             logger.warning(
@@ -201,6 +260,17 @@ def remove_link_documents(link_id, username):
             vector_store.delete(ids=matching_docs['ids'])
             logger.info(
                 f"Removed documents with link_id={link_id} belonging to user={username}")
+                
+            # Sync remove to FTS5
+            try:
+                from backend.database import sync_engine
+                from backend.core.fts5_utils import delete_by_link_id
+                with sync_engine.connect() as conn:
+                    raw_conn = conn.connection.dbapi_connection
+                    delete_by_link_id(raw_conn, link_id, belongs_to=username)
+            except Exception as e:
+                logger.error(f"FTS dual remove failed in chroma remove_link_documents: {e}")
+                
             return True
         else:
             logger.warning(

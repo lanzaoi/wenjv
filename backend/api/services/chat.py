@@ -19,7 +19,7 @@ def build_context_block(hits) -> str:
         title = doc.metadata.get("title") or doc.metadata.get("filename") or source
         page = doc.metadata.get("page", "")
         parts.append(
-            f"[{i}] {title} (page={page}, score={score})\n{doc.page_content}"
+            f"[{i}] {title} (page={page}, distance={score:.4f})\n{doc.page_content}"
         )
     return "\n\n---\n\n".join(parts)
 
@@ -160,7 +160,7 @@ async def rag_chat_events(
         citations = []
         hits = []
         if use_rag:
-            docs = search_service.search_documents(
+            docs = await search_service.search_documents(
                 prompt=question,
                 user_email=user_email,
                 include_sources=include_sources,
@@ -187,6 +187,11 @@ async def rag_chat_events(
                     }
                 )
         yield {"type": "citations", "citations": citations}
+
+        if use_rag and not hits and getattr(settings, "RAG_REFUSE_ON_EMPTY", True):
+            yield {"type": "token", "content": "抱歉，知识库中未找到相关依据，无法回答该问题。"}
+            yield {"type": "done"}
+            return
 
         context = build_context_block(hits) if use_rag else ""
         messages = build_messages(

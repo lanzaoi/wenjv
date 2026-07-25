@@ -22,7 +22,7 @@ async def search_documents(
     try:
         window_size = request.window_size or 5
         source_type = request.source_type
-        docs = search_service.search_documents(
+        docs = await search_service.search_documents(
             prompt=request.prompt,
             user_email=user.email,
             include_sources=request.include_sources,

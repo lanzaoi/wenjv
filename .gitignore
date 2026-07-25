@@ -24,3 +24,5 @@ eval/msmarco_data/
 .agents/
 *.egg-info/
 .pytest_cache/
+eval/sample_1000.json
+eval/msmarco_data/

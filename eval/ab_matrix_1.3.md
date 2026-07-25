@@ -2,6 +2,7 @@
 
 | Config | MRR@10 | Recall@5 | Recall@10 | n_queries | n_no_hits | runtime_sec | Status |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `default` | 0.5512 | 0.7400 | 0.8600 | 50 | 6 | 234.49 | SUCCESS |
-| `hybrid_off` | 0.5131 | 0.7300 | 0.8000 | 50 | 9 | 218.00 | SUCCESS |
-| `rerank_on` | 0.4087 | 0.6200 | 0.7600 | 50 | 11 | 269.65 | SUCCESS |
+| `default` | 0.5245 | 0.6800 | 0.8000 | 50 | 9 | 279.26 | SUCCESS |
+| `hybrid_off` | 0.5175 | 0.6600 | 0.8000 | 50 | 9 | 242.04 | SUCCESS |
+| `rerank_on` | 0.5879 | 0.7600 | 0.8600 | 50 | 6 | 345.23 | SUCCESS |
+| `mmr_off` | 0.7400 | 0.9400 | 0.9600 | 50 | 2 | 104.93 | SUCCESS |

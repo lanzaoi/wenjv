@@ -16,6 +16,7 @@
 | [product-scope.md](./product-scope.md) | 产品边界：记忆/权重/非目标 |
 | [ai-sdd-interview-and-workflow.md](./ai-sdd-interview-and-workflow.md) | SDD 驾驭 AI、面试题库、简历 STAR |
 | [git-and-ai-hygiene.md](./git-and-ai-hygiene.md) | Git/提交/密钥/验证门禁（驾驭 AI 细则） |
+| [adr/0001-lance-vs-pgvector.md](./adr/0001-lance-vs-pgvector.md) | ADR 0001：嵌入式 LanceDB vs 服务器端 pgvector 引擎技术选型决策 |
 
 ## 相关但不放在 specs/ 的文档
 

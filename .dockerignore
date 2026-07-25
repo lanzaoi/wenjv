@@ -1,0 +1,34 @@
+# Git
+.git
+.gitignore
+
+# Virtual environments and Python caches
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+
+# Local database and data directories
+*.db
+*.sqlite
+*.sqlite3
+lance_db/
+chroma_db/
+milvus_data.db
+uploads/
+logs/
+data/
+
+# Test/eval outputs and AI assistant artifacts
+eval/results/
+eval/msmarco_data/
+.hermes/
+.gemini/
+.agents/
+.env
+*.env

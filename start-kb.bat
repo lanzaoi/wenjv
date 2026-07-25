@@ -9,6 +9,17 @@ set "BACKEND_PORT=8000"
 set "FRONTEND_PORT=8501"
 set "ENV_FILE=%USERPROFILE%\.config\inquisitive\backend.env"
 
+rem =====================================================================
+rem [IMPORTANT NOTE ON DOCKER COMPOSE COMPATIBILITY]
+rem This script and docker-compose.yml share the exact same physical data directory:
+rem   %USERPROFILE%\.config\inquisitive\
+rem When both use the same directory, SQLite (inquisitive.db) and LanceDB
+rem indexes are completely persistent and interoperable between host and container.
+rem CAUTION: Do NOT run start-kb.bat while 'docker-compose up' is running!
+rem SQLite and LanceDB require single-process exclusive write access.
+rem Concurrent writes from host and container will cause database locks and corruption.
+rem =====================================================================
+
 echo.
 echo ========================================
 echo   Personal KB launcher

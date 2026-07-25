@@ -17,3 +17,10 @@ uploads/
 .env
 powershell.cmd
 eval/ab_results.json
+eval/results/
+eval/msmarco_data/
+.hermes/
+.gemini/
+.agents/
+*.egg-info/
+.pytest_cache/

@@ -1,0 +1,17 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: inquisitive-api:latest
+    ports:
+      - "8000:8000"
+    # IMPORTANT: Never hardcode SECRET_KEY or API_KEY in this file or in the Dockerfile.
+    # Environment configuration is read from ~/.config/inquisitive/backend.env (not tracked in Git).
+    # On Windows: %USERPROFILE%\.config\inquisitive\backend.env
+    # On Linux/macOS: ~/.config/inquisitive/backend.env
+    volumes:
+      # Bind mount host configuration and data directory to container's non-root user home directory.
+      # This ensures persistence for SQLite (inquisitive.db), LanceDB vector store, and loads backend.env.
+      - ${USERPROFILE:-${HOME:-~}}/.config/inquisitive:/home/appuser/.config/inquisitive
+    restart: unless-stopped

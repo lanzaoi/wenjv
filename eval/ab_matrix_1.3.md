@@ -1,0 +1,7 @@
+# MS MARCO M-small Matrix (v1.3)
+
+| Config | MRR@10 | Recall@5 | Recall@10 | n_queries | n_no_hits | runtime_sec | Status |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `default` | 0.5512 | 0.7400 | 0.8600 | 50 | 6 | 234.49 | SUCCESS |
+| `hybrid_off` | 0.5131 | 0.7300 | 0.8000 | 50 | 9 | 218.00 | SUCCESS |
+| `rerank_on` | 0.4087 | 0.6200 | 0.7600 | 50 | 11 | 269.65 | SUCCESS |

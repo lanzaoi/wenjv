@@ -86,6 +86,19 @@ PPTX：允许「按幻灯片抽文本」的务实实现；增强（备注/表格
 - 无命中：系统会触发硬拒答（默认 `RAG_REFUSE_ON_EMPTY=true`），直接返回无依据提示，避免大模型一本正经瞎编。
 - 评估：使用 `eval/` + 脚本对比改动前后（见 `.hermes/plans` 中 G0/G1）。
 
+### 自动化评估与架构门禁（v1.3 规范）
+为杜绝“凭感觉调参”，本项目在 `eval/` 目录构建了基于 MS MARCO 的标准检索评估流水线与消融实验矩阵：
+1. **如何跑评估**：
+   - 准备数据：通过 `python eval/sample_msmarco.py` 采样评测集，通过 `python eval/ingest_msmarco.py` 写入向量库。
+   - 运行实验：使用 `python eval/run_eval.py` 进行单次评测，或使用 `python eval/run_matrix.py` 自动批量运行 4 组消融矩阵（`default`、`hybrid_off`、`rerank_on`、`mmr_off`）。
+   - 查看报告：评估结果自动生成于 `eval/ab_matrix_1.3.csv` 与 `eval/ab_matrix_1.3.md`，重点观测 **MRR@10**、**Recall@5**、**Recall@10** 及耗时指标。
+2. **默认配置与门禁表述**：
+   - 决策依据：实验矩阵数据结论统一归档于 [`eval/gate_decision.md`](../eval/gate_decision.md)。
+   - 门禁纪律：**严禁任何自动化脚本或开发人员私自修改代码默认开关**，参数变更必须经由人审核签署。当前推荐默认配置为：
+     - **Hybrid 混合检索**：默认推荐开启（配合 FTS5 弥补专用名词与准确代码召回）。
+     - **MMR 多样性重排**：默认推荐开启（有效剔除高相似度冗余块，提升信息熵）。
+     - **Rerank 二次重排**：默认推荐关闭（推理耗时显著升高，且易增加不确定的拒答率，仅限高算力场景选配）。
+
 ## 9. 使用频率加权
 
 - **默认不做**复杂热度排序（见 `product-scope.md`）。  

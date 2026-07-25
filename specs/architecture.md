@@ -81,3 +81,63 @@ Streamlit UI (:8501) --JWT--> FastAPI (:8000)
 - 不在本阶段引入独立微服务拆分。  
 - 不把 Streamlit 当唯一长期架构中心；API 才是稳定边界。  
 - 不把 LangChain Agent 作为主干（允许少量胶水：切块/Embedding）。
+
+## 8. 核心链路架构图 (Core Pipeline Topology)
+
+```mermaid
+graph TD
+    subgraph Client ["客户端层 (Client Layer)"]
+        UI["Streamlit UI"]
+    end
+
+    subgraph API ["接口与鉴权层 (API & Auth Layer)"]
+        Router["FastAPI Routers"]
+        Auth["JWT Auth (current_active_user)"]
+    end
+
+    subgraph Services ["业务编排层 (Service Layer)"]
+        Service["Services (Search / Chat / Files)"]
+    end
+
+    subgraph Ingestion ["异步入库链路 (Async Ingestion Boundary)"]
+        Worker["Durable Ingestion Workers (Async)"]
+        Parser["Parsers (OCR / Link / File / Note)"]
+        Chunker["Chunker & Embedder"]
+        StoreWrite["Dual-Write: LanceDB + SQLite FTS5 (Hard Filter: user_id)"]
+    end
+
+    subgraph Retrieval ["三路召回与重排链路 (Retrieval Pipeline)"]
+        Recalls["3-Way Recall: Vector + FTS5 + Structured (Hard Filter: user_id)"]
+        RRF["RRF Fusion (Reciprocal Rank Fusion)"]
+        Rerank["Optional Reranker (Cross-Encoder)"]
+        MMR["MMR Diversification"]
+    end
+
+    subgraph Chat ["流式问答链路 (Chat Pipeline)"]
+        SSE["/chat SSE Stream (Citations + Token Stream)"]
+        LLM["LLM Engine (DeepSeek / Ollama / SiliconFlow)"]
+    end
+
+    %% Flow connections
+    UI -- "1. Request with Bearer JWT" --> Router
+    Router -- "2. Verify Token & Extract User" --> Auth
+    Auth -- "3. Authenticated Context (user_id)" --> Service
+
+    %% Ingestion branch
+    Service -- "4a. Dispatch Job (user_id)" --> Worker
+    Worker --> Parser
+    Parser --> Chunker
+    Chunker --> StoreWrite
+
+    %% Retrieval & Chat branch
+    Service -- "4b. Query with user_id" --> Recalls
+    Recalls --> RRF
+    RRF --> Rerank
+    Rerank --> MMR
+    MMR -- "5. Citations & Grounding" --> SSE
+    SSE -- "6. Prompt + Citations" --> LLM
+```
+
+> [!IMPORTANT]
+> **权限硬过滤点 (Permission Hard Filtering)**: 所有对元数据库（SQLite）与向量库（LanceDB/Chroma/Milvus）的读写操作，均在数据查询底层强制绑定 `user_id` 与 `belongs_to` 条件，确保绝对的租户数据物理级隔离。
+> **异步工作流边界 (Async Worker Boundary)**: 文档与笔记的切块、Embedding 生成及 FTS5 索引构建均由后台 Durable Workers 异步执行，不阻塞主 HTTP 响应请求，支持应用重启后的任务自动断点续跑与失败重试。

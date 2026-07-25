@@ -37,7 +37,7 @@ async def rerank(query: str, documents: list[str]) -> list[dict]:
     model = getattr(settings, "RERANK_MODEL", "BAAI/bge-reranker-v2-m3")
     timeout = getattr(settings, "RERANK_TIMEOUT_SECONDS", 8)
     
-    url = f"{api_base.rstrip('/')}/rerank"
+    url = f"{api_base.rstrip('/').replace('/embeddings', '')}/rerank"
     
     payload = {
         "model": model,

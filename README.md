@@ -22,15 +22,17 @@
 | **文件** | 上传、状态轮询、下载；支持 txt / md / pdf / docx / pptx / csv / json 等（可配置） |
 | **链接** | 单条 / 批量提交；抓取正文后入库；可选实验性递归抓取 |
 
-### 工程能力
+### 工程能力 (v1.3 强固与标准化)
 
-- **JWT 鉴权**，多用户资源隔离  
-- **可恢复异步任务**（`ingestion_jobs`）：pending → running → succeeded/failed，支持重试与重启回收  
-- **可插拔文档解析**（`backend/parsers/`）：text / pdf / docx / pptx  
-- **向量检索**：用户隔离、`source_type` 过滤、引用 include/exclude  
-- **后端 RAG 对话**：`POST /chat` SSE（citations + token 流）；前端优先走后端，失败再回退  
-- 上传 **扩展名白名单 + 体积上限**  
-- API 文档：后端启动后访问 `/redoc`
+- **严密的多租户安全隔离**：基于 **JWT 鉴权** 与 `user_id` / `belongs_to` 硬过滤，通过矩阵测试用例验证从 API 接口到底层向量检索的100%跨租户隔离防御。  
+- **异步任务队列与失败重试**（`ingestion_jobs`）：支持状态转换（pending → running → succeeded/failed）、超时自动回收及新增的 `POST /jobs/{id}/retry` 失败或撤销任务重试端点。  
+- **高精准检索与重排管线**：支持基于向量与 SQLite FTS5 词法补充的混合检索 (Hybrid Search)、等权 RRF 融合计算及 MMR 边际多样性去重过滤。  
+- **量化评估与配置门禁**：内置基于 MS MARCO 数据集的标准化检索评分评估系统 (`eval/`) 与 4 组矩阵测试跑批，以数据门禁文档（`gate_decision.md`）指导默认配置。  
+- **生产级 Docker Compose 部署**：支持 `docker-compose up` 一键拉起，采用非 root 专用账户 (`appuser`) 安全运行、零凭据外泄配置，并与本机直接运行共享统一持久化数据。  
+- **嵌入式向量存储引擎**：默认采用单文件高性能 LanceDB 引擎（选型论证详见 [ADR 0001](./specs/adr/0001-lance-vs-pgvector.md)；我们恪守诚实原则，在个人自用与小团队规模下不宣称且不滥用服务器端 pgvector）。  
+- **可插拔文档解析**（`backend/parsers/`）：支持 text / pdf / docx / pptx，提供清晰的容错与报错反馈。  
+- **后端统一 RAG 编排**：`POST /chat` SSE 流式输出（附带 citations 与 token 流）；避免前端直接直连大模型。  
+- **资源安全与自检 API**：上传文件扩展名白名单 + 25 MiB 体积上限防御，提供启动后可直接访问的 `/redoc` 与 `/ping` 接口。
 
 ### 对话模式（前端）
 
@@ -63,6 +65,8 @@ FastAPI (:8000)
 | 向量库 | chunk 语义检索（metadata 含 `user_id` 等） |
 
 - 工程与产品规范：[`specs/`](./specs/)（架构、API、RAG、安全、范围）  
+- 选型论证文档：[`specs/adr/0001-lance-vs-pgvector.md`](./specs/adr/0001-lance-vs-pgvector.md)（LanceDB vs pgvector 诚实决策）
+- 参数门禁决策：[`eval/gate_decision.md`](./eval/gate_decision.md)（M-small 矩阵测试报表与默认开关签字确认）
 - 已完成改造清单：[`UPGRADE_ROADMAP.md`](./UPGRADE_ROADMAP.md)  
 - 可执行演进计划：[`.hermes/plans/`](./.hermes/plans/)
 
@@ -150,6 +154,29 @@ inquisitive-start
 ```
 
 首次拉起后端可能稍慢，请等待完成。
+
+### 5. Docker Compose 容器化部署
+
+本项目支持通过 `docker-compose` 极速拉起可复现的后端 API 容器运行环境。
+
+#### 前置条件
+1. **容器引擎**：Linux / macOS 系统直接支持；Windows 系统请确保已安装并启动 **Docker Desktop**，并开启 **WSL2 引擎** (Windows Subsystem for Linux 2) 支持。
+2. **外部配置文件与数据目录**：启动前，请务必确认宿主机上已创建 `~/.config/inquisitive/`（Windows 下为 `%USERPROFILE%\.config\inquisitive\`）目录，并将配置放置于该目录下的 `backend.env` 文件中。
+
+> [!IMPORTANT]
+> 零外泄安全铁律：为遵循安全最佳实践，**严禁**在 Git 仓库的 `Dockerfile` 或 `docker-compose.yml` 中硬编码 `SECRET_KEY` 或 API 密钥。所有敏感配置均需通过宿主机上的 `~/.config/inquisitive/backend.env` 外部注入。
+
+#### 启动命令
+在项目根目录下开启终端执行：
+```bash
+docker-compose up -d --build
+```
+容器启动后，后端 API 服务将挂载于 `<http://localhost:8000>`，OpenAPI 交互式接口文档见 `<http://localhost:8000/redoc>`。
+
+#### 数据持久化与多模式互通说明
+- **目录挂载关系**：在 `docker-compose.yml` 中，宿主机的 `~/.config/inquisitive` 目录通过 bind mount 映射至容器内部非 root 用户（`appuser`）的主目录 `/home/appuser/.config/inquisitive`。
+- **与本机脚本 (bat/sh) 互通**：使用 `docker-compose` 与使用本机直接运行脚本（如 `start-kb.bat` 或 `inquisitive-start`）**共享完全相同的宿主机数据目录**。因此，无论通过容器还是原生脚本启动，SQLite 数据库 (`inquisitive.db`) 与 LanceDB 向量库 (`lance_db/`) 均可无缝互通与持久化保存。
+- **⚠️ 读写并发警告**：由于 SQLite 与 LanceDB 属于嵌入式存储引擎，不支持跨独立的 OS 运行环境进行多进程并发写。严禁**同时**运行后台 Docker 容器与本机终端（如双击 `start-kb.bat`）对同一份数据进行操作，否则会导致数据库死锁 (`database is locked`) 甚至文件锁冲突损坏。
 
 ---
 
@@ -305,6 +332,8 @@ Copyright (C) 2026 Lanzao
 
 - **拒答行为 (Refusal)**：默认开启 (`RAG_REFUSE_ON_EMPTY=true`)。当启用 RAG 且检索未能命中任何知识库片段时，系统将直接返回“库中未找到相关依据”的提示，而不会调用大模型进行无根据的推演或幻觉生成。
 
-## 评测 (Eval)
+## 评测与架构门禁 (Eval & Gate Decisions)
 
-为了评估 RAG 的真实质量，请参考 [eval/README.md](eval/README.md) 使用黄金测试集进行打分。
+为了评估 RAG 检索管线的真实质量，请参考 [eval/README.md](eval/README.md) 使用黄金测试集与 A/B Test 矩阵进行打分。
+
+关于系统核心检索参数（Hybrid/MMR/Rerank 等）的默认值开关选型与演进准则，请参阅并严格遵守 **[配置门禁决策文档 (Gate Decision)](eval/gate_decision.md)**。**在未获得人工签字确认前，不得擅自修改源码中的默认配置。**

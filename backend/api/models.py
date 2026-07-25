@@ -80,6 +80,7 @@ class JobStatus(str, enum.Enum):
     RUNNING = "running"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
 class JobType(str, enum.Enum):

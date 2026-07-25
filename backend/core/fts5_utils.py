@@ -41,7 +41,15 @@ def insert_fts5(conn: sqlite3.Connection, chunk_id: str, title: str, filename: s
                                    user_id, belongs_to, source_type, link_id, resource_id)
             VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (chunk_id, title, filename, page_content, user_id, belongs_to,
-                  source_type, link_id, resource_id))
+                 source_type, link_id, resource_id))
+        except sqlite3.OperationalError:
+            # Old schema without resource_id column — fall back
+            cursor.execute("""
+            INSERT INTO chunks_fts(chunk_id, title, filename, page_content,
+                                   user_id, belongs_to, source_type, link_id)
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+            """, (chunk_id, title, filename, page_content, user_id, belongs_to,
+                 source_type, link_id))
         except sqlite3.OperationalError as op_e:
             msg = str(op_e).lower()
             if "no such table" in msg:

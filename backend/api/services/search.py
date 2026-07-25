@@ -216,30 +216,21 @@ async def search_documents(
     if getattr(settings, "RERANK_ENABLED", False) and len(final_results) > 0:
         from backend.core.rerank_client import rerank
         try:
-            # We pass final_results[:fetch_limit] texts to rerank
             docs_to_rerank = final_results[:fetch_limit]
             docs_content = [res[0].page_content for res in docs_to_rerank]
-            
+
             rerank_results = await rerank(prompt, docs_content)
-            
-            if rerank_results:
-                # rerank_results gives us {"index": i, "relevance_score": s}
+
+            if rerank_results is not None and len(rerank_results) > 0:
+                # Rerank succeeded: rebuild in new order by relevance_score
                 reranked_final = []
                 for item in rerank_results:
                     original_idx = item["index"]
                     score = item["relevance_score"]
                     doc = docs_to_rerank[original_idx][0]
-                    # Convert relevance_score to a distance-like metric for compatibility if needed
-                    # but typically MMR wants similarity. We will just pass the score.
-                    # Or wait, search_documents returns distance where smaller is better.
-                    # BGE returns larger is better for relevance.
-                    # The prompt didn't specify transforming the score, it just said "返回按 relevance_score 重排".
                     reranked_final.append((doc, score))
-                
                 final_results = reranked_final
-            else:
-                # fail-open fallback
-                pass
+            # else: rerank failed (None) or empty — keep original final_results
         except Exception as e:
             import logging
             logging.getLogger(settings.LOGGER_NAME).error(f"Rerank failed: {e}")

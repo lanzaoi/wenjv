@@ -311,6 +311,26 @@ async def _execute_document(session: AsyncSession, job: IngestionJob, payload: d
         job.user_id,
     )
 
+    if file_name.lower().endswith(".pdf") and settings.MULTIMODAL_ENABLED:
+        try:
+            from backend.core.multimodal import process_pdf_images, process_pdf_tables
+            img_docs = await process_pdf_images(file_path, str(job.resource_id))
+            tbl_docs = await process_pdf_tables(file_path, str(job.resource_id))
+            all_mm_docs = img_docs + tbl_docs
+            if all_mm_docs:
+                for doc in all_mm_docs:
+                    doc.metadata.update({
+                        "source": file_url,
+                        "filename": file_name,
+                        "belongs_to": job.user_email,
+                        "user_id": str(job.user_id) if job.user_id is not None else None,
+                        "file_id": str(job.resource_id),
+                        "resource_id": str(job.resource_id),
+                    })
+                await asyncio.to_thread(vector_store.add_documents, all_mm_docs)
+        except Exception as mm_err:
+            logger.warning(f"Multimodal ingestion failed for {file_name} (fail-open): {mm_err}")
+
     await _mark_resource_status(session, job, ProcessingStatus.FINISHED, None)
 
 

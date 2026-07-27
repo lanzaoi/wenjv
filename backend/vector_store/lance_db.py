@@ -49,7 +49,9 @@ def initialize_collection():
             pa.field("link_id", pa.string()),
             pa.field("file_id", pa.string()),
             pa.field("source_type", pa.string()),
-            pa.field("resource_id", pa.string())
+            pa.field("resource_id", pa.string()),
+            pa.field("chunk_group", pa.string()),
+            pa.field("chunk_order", pa.int32())
         ])
 
         # Create empty table with schema
@@ -159,7 +161,8 @@ def add_documents(documents):
 
         # Ensure common fields exist
         for field in ["source", "page", "title", "filename", "belongs_to",
-                      "link_id", "file_id", "source_type", "user_id", "resource_id"]:
+                      "link_id", "file_id", "source_type", "user_id", "resource_id",
+                      "chunk_group", "chunk_order"]:
             if field not in entity:
                 entity[field] = None
 
@@ -198,6 +201,71 @@ def add_documents(documents):
                     logger.error(f"FTS dual write failed for chunk_id {entity['id']}: {e}")
     except Exception as e:
         logger.error(f"FTS dual write connection failed in add_documents: {e}")
+
+    # Sync to ChunkMappingTable for small-to-large retrieval
+    try:
+        from backend.database import sync_engine, ChunkMappingTable
+        from sqlalchemy.orm import Session
+        with Session(sync_engine) as session:
+            for entity in data:
+                g = entity.get("chunk_group")
+                if g is None:
+                    continue
+                o = entity.get("chunk_order")
+                if o is None:
+                    continue
+                existing = session.query(ChunkMappingTable).filter(
+                    ChunkMappingTable.chunk_id == entity["id"]).first()
+                if not existing:
+                    session.add(ChunkMappingTable(
+                        chunk_id=entity["id"],
+                        chunk_group=str(g),
+                        chunk_order=int(o),
+                        resource_id=entity.get("resource_id", "")))
+            session.commit()
+    except Exception as e:
+        logger.warning(f"ChunkMappingTable sync failed (non-fatal): {e}")
+
+    # Sync to DocEmbeddingTable for late chunking
+    if getattr(settings, "LATE_CHUNKING_ENABLED", False):
+        try:
+            from backend.database import sync_engine, DocEmbeddingTable
+            from sqlalchemy.orm import Session
+            import numpy as np, struct
+            # Compute average vector per resource_id
+            rid_vecs = {}
+            rid_counts = {}
+            for entity in data:
+                rid = entity.get("resource_id", "")
+                if not rid:
+                    continue
+                raw = entity.get("vector")
+                if raw is None:
+                    continue
+                vec = np.array(raw, dtype=np.float32) if isinstance(raw, list) else np.frombuffer(raw, dtype=np.float32)
+                if rid not in rid_vecs:
+                    rid_vecs[rid] = vec.copy()
+                    rid_counts[rid] = 1
+                else:
+                    rid_vecs[rid] += vec
+                    rid_counts[rid] += 1
+            with Session(sync_engine) as session:
+                for rid, vec_sum in rid_vecs.items():
+                    avg = (vec_sum / rid_counts[rid]).astype(np.float32)
+                    blob = avg.tobytes()
+                    existing = session.query(DocEmbeddingTable).filter(
+                        DocEmbeddingTable.resource_id == rid).first()
+                    if existing:
+                        existing.embedding = blob
+                        existing.chunk_count = rid_counts[rid]
+                        existing.updated_at = __import__("datetime").datetime.utcnow()
+                    else:
+                        session.add(DocEmbeddingTable(
+                            resource_id=rid, embedding=blob,
+                            dims=len(avg), chunk_count=rid_counts[rid]))
+                session.commit()
+        except Exception as e:
+            logger.warning(f"DocEmbeddingTable sync failed (non-fatal): {e}")
 
 
 def add_link_content_to_vector_store(

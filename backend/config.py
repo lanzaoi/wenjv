@@ -185,6 +185,22 @@ class Settings(BaseSettings):
     TEXT_SPLITTER_CHUNK_OVERLAP:  int = 150
     TEXT_SPLITTER_SEPARATORS: list[str] = ["\n\n", "\n", "。", "，", " ", ""]
 
+    # ---- 1.5 Chunking 2.0 ----
+
+    # Small-to-large: retrieve with small chunks, expand context to neighbors
+    CHUNK_EXPAND_ENABLED: bool = False
+    CHUNK_EXPAND_WINDOW: int = 2
+    CHUNK_RETRIEVAL_SIZE: int = 256
+
+    # Multimodal (1.5)
+    MULTIMODAL_ENABLED: bool = False
+    GEMINI_API_KEY: str = os.environ.get("GOOGLE_API_KEY", "")
+    GEMINI_VL_MODEL: str = "gemini-2.0-flash"
+
+    # Late Chunking (1.5)
+    LATE_CHUNKING_ENABLED: bool = False
+    LATE_CHUNKING_TOP_DOCS: int = 5
+
     # Modify if needed to use other relational DB
     DATABASE_URL: str = f"sqlite+aiosqlite:///{SQLITE_DB_PATH}"
 

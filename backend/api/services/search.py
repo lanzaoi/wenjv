@@ -201,6 +201,13 @@ async def search_documents(
         pool_size = getattr(settings, "RERANK_CANDIDATES", 20)
         fetch_limit = pool_size if mmr_enabled else window_size
 
+        # Late chunking: search doc-level embeddings first
+        if getattr(settings, "LATE_CHUNKING_ENABLED", False):
+            return _late_chunking_search(
+                prompt, user_email, window_size, user_id, source_type,
+                include_sources, exclude_sources, user_id
+            )
+
         kwargs["window_size"] = fetch_limit
 
         # Backends that accept user_id (Lance) will use it; others ignore via TypeError fallback
@@ -446,6 +453,7 @@ async def search_documents(
             else:
                 final_results = final_results[:window_size]
             
+        final_results = await asyncio.to_thread(_expand_context, final_results, window_size)
         _set_query_cache(query_hash, uid, final_results)
         return final_results
     except Exception as e:
@@ -488,3 +496,137 @@ def format_search_hits(
         if source not in uniq_sources:
             uniq_sources.add(source)
     return results, uniq_sources
+
+
+def _fetch_chunks_by_ids(ids: List[str]) -> dict:
+    if not ids:
+        return {}
+    id_to_content = {}
+    try:
+        from backend.vector_store.adapter import vector_db
+        vs = vector_db()
+        if hasattr(vs, "db") and hasattr(vs, "TABLE_NAME"):
+            table = vs.db.open_table(vs.TABLE_NAME)
+            cond = " OR ".join(f"id = '{str(i)}'" for i in ids)
+            df = table.search(None).where(cond).limit(len(ids) + 10).to_pandas()
+            for _, row in df.iterrows():
+                id_to_content[str(row["id"])] = str(row["page_content"])
+        elif hasattr(vs, "collection") and hasattr(vs.collection, "get"):
+            res = vs.collection.get(ids=ids)
+            for i, doc in zip(res.get("ids", []), res.get("documents", [])):
+                id_to_content[str(i)] = str(doc)
+        elif hasattr(vs, "client") and hasattr(vs, "COLLECTION_NAME"):
+            res = vs.client.query(collection_name=vs.COLLECTION_NAME, filter=f"id in {ids}", output_fields=["id", "page_content"])
+            for r in res:
+                id_to_content[str(r["id"])] = str(r["page_content"])
+    except Exception as e:
+        logger.warning(f"Error fetching chunks by ids: {e}")
+    return id_to_content
+
+
+def _late_chunking_search(prompt, user_email, window_size, user_id, source_type, include_sources, exclude_sources, uid):
+    """Late chunking: recall docs via doc_embeddings table, then score chunks within those docs."""
+    import numpy as np
+    from backend.database import sync_engine, DocEmbeddingTable
+    from sqlalchemy.orm import Session
+    from langchain.schema import Document
+
+    # Embed query
+    query_vec = np.array(vector_store.embeddings.embed_query(prompt), dtype=np.float32)
+
+    top_docs = getattr(settings, "LATE_CHUNKING_TOP_DOCS", 5)
+    doc_scores = []
+    with Session(sync_engine) as session:
+        rows = session.query(DocEmbeddingTable).all()
+        for row in rows:
+            doc_vec = np.frombuffer(row.embedding, dtype=np.float32)
+            sim = float(np.dot(query_vec, doc_vec) / (
+                np.linalg.norm(query_vec) * np.linalg.norm(doc_vec) + 1e-10))
+            doc_scores.append((row.resource_id, sim))
+    doc_scores.sort(key=lambda x: x[1], reverse=True)
+    top_rids = [rid for rid, _ in doc_scores[:top_docs]]
+
+    # Fetch all chunks for top docs from LanceDB
+    from backend.vector_store.lance_db import fetch_documents_by_resource
+    all_chunks = []
+    for rid in top_rids:
+        chunks = fetch_documents_by_resource(rid, source_type or "note", user_id=uid, username=user_email)
+        all_chunks.extend(chunks)
+
+    # Re-score chunks against query
+    scored = []
+    for doc, _ in all_chunks:
+        cvec = np.array(vector_store.embeddings.embed_query(doc.page_content), dtype=np.float32)
+        sim = float(np.dot(query_vec, cvec) / (
+            np.linalg.norm(query_vec) * np.linalg.norm(cvec) + 1e-10))
+        scored.append((doc, sim))
+    scored.sort(key=lambda x: x[1], reverse=True)
+    return scored[:window_size]
+
+
+def _expand_context(results: List, window_size: int) -> List:
+    if not getattr(settings, "CHUNK_EXPAND_ENABLED", False) or not results:
+        return results[:window_size]
+    
+    window = getattr(settings, "CHUNK_EXPAND_WINDOW", 2)
+    expanded_results = []
+    
+    try:
+        from sqlalchemy.orm import Session
+        from backend.database import sync_engine, ChunkMappingTable
+        from langchain_core.documents import Document
+        
+        with Session(sync_engine) as session:
+            for item in results[:window_size]:
+                try:
+                    doc = item[0]
+                    score = item[1]
+                    chunk_id = _get_stable_id(doc)
+                    if not chunk_id:
+                        expanded_results.append(item)
+                        continue
+                        
+                    mapping_row = session.query(ChunkMappingTable).filter(ChunkMappingTable.chunk_id == str(chunk_id)).first()
+                    if not mapping_row:
+                        expanded_results.append(item)
+                        continue
+                        
+                    group_id = mapping_row.chunk_group
+                    center_order = mapping_row.chunk_order
+                    
+                    neighbor_rows = session.query(ChunkMappingTable).filter(
+                        ChunkMappingTable.chunk_group == group_id,
+                        ChunkMappingTable.chunk_order >= center_order - window,
+                        ChunkMappingTable.chunk_order <= center_order + window
+                    ).order_by(ChunkMappingTable.chunk_order).all()
+                    
+                    if not neighbor_rows:
+                        expanded_results.append(item)
+                        continue
+                        
+                    neighbor_ids = [r.chunk_id for r in neighbor_rows]
+                    id_to_content = _fetch_chunks_by_ids(neighbor_ids)
+                    
+                    id_to_content[str(chunk_id)] = doc.page_content
+                    
+                    ordered_contents = []
+                    for nid in neighbor_ids:
+                        if nid in id_to_content and id_to_content[nid].strip():
+                            ordered_contents.append(id_to_content[nid].strip())
+                            
+                    if not ordered_contents:
+                        expanded_results.append(item)
+                        continue
+                        
+                    merged_content = "\n\n".join(ordered_contents)
+                    new_doc = Document(page_content=merged_content, metadata=dict(doc.metadata))
+                    new_doc.metadata["expanded_from_chunk"] = str(chunk_id)
+                    expanded_results.append((new_doc, score))
+                except Exception as chunk_err:
+                    logger.warning(f"Fail-open expanding chunk {item[0].metadata.get('id')}: {chunk_err}")
+                    expanded_results.append(item)
+    except Exception as e:
+        logger.warning(f"Fail-open in _expand_context: {e}")
+        return results[:window_size]
+        
+    return expanded_results[:window_size]

@@ -106,34 +106,124 @@ def extract_text_from_pdf(pdf_file):
     return texts
 
 
-def chunk_pdf_content(text_content_list):
+def record_chunk_mappings(mappings: list):
+    if not mappings:
+        return
+    try:
+        from sqlalchemy.orm import Session
+        from backend.database import sync_engine, ChunkMappingTable
+        with Session(sync_engine) as session:
+            for m in mappings:
+                row = ChunkMappingTable(
+                    chunk_id=str(m["chunk_id"]),
+                    chunk_group=str(m["chunk_group"]),
+                    chunk_order=int(m["chunk_order"]),
+                    resource_id=str(m["resource_id"]) if m.get("resource_id") else None
+                )
+                session.merge(row)
+            session.commit()
+    except Exception as e:
+        logger.warning(f"Failed to record batch chunk mappings: {e}")
+
+
+def get_active_splitter():
+    if getattr(settings, "CHUNK_EXPAND_ENABLED", False):
+        chunk_size = getattr(settings, "CHUNK_RETRIEVAL_SIZE", 256)
+        return RecursiveCharacterTextSplitter(
+            chunk_size=chunk_size,
+            chunk_overlap=min(getattr(settings, "TEXT_SPLITTER_CHUNK_OVERLAP", 150), max(10, chunk_size // 5)),
+            length_function=len,
+            separators=getattr(settings, "TEXT_SPLITTER_SEPARATORS", ["\n\n", "\n", "。", "，", " ", ""])
+        )
+    return text_splitter
+
+
+def _process_chunks_with_mapping(raw_chunks: list, resource_id: str = None):
+    is_s2l = getattr(settings, "CHUNK_EXPAND_ENABLED", False)
+    if not is_s2l:
+        return raw_chunks
+    
+    chunk_group = str(resource_id) if resource_id else str(uuid.uuid4())
+    mappings = []
+    out = []
+    for idx, item in enumerate(raw_chunks):
+        chunk_id = str(uuid.uuid4())
+        item_copy = dict(item)
+        item_copy["id"] = chunk_id
+        item_copy["chunk_id"] = chunk_id
+        item_copy["chunk_group"] = chunk_group
+        item_copy["chunk_order"] = idx
+        mappings.append({
+            "chunk_id": chunk_id,
+            "chunk_group": chunk_group,
+            "chunk_order": idx,
+            "resource_id": resource_id
+        })
+        out.append(item_copy)
+    record_chunk_mappings(mappings)
+    return out
+
+
+class ChunkString(str):
+    metadata: dict = {}
+
+
+def chunk_pdf_content(text_content_list, resource_id: str = None):
+    splitter = get_active_splitter()
     texts = []
     for content_dict in text_content_list:
         text = content_dict["text"]
         page_number = content_dict["page_number"]
-        for splitted_text in text_splitter.split_text(text):
+        for splitted_text in splitter.split_text(text):
             texts.append({
                 "text": splitted_text,
                 "page_number": page_number
             })
-    return texts
+    return _process_chunks_with_mapping(texts, resource_id=resource_id)
 
 
-def chunk_non_pdf_content(text_content):
+def chunk_non_pdf_content(text_content, resource_id: str = None):
+    splitter = get_active_splitter()
     texts = []
-    for i, splitted_text in enumerate(text_splitter.split_text(text_content)):
+    for i, splitted_text in enumerate(splitter.split_text(text_content)):
         texts.append({
             "text":  splitted_text,
             "page_number": i + 1
         })
-    return texts
+    return _process_chunks_with_mapping(texts, resource_id=resource_id)
 
 
-def chunk_link_content(text_content):
-    return text_splitter.split_text(text_content)
+def chunk_link_content(text_content, resource_id: str = None):
+    splitter = get_active_splitter()
+    splitted = splitter.split_text(text_content)
+    is_s2l = getattr(settings, "CHUNK_EXPAND_ENABLED", False)
+    if not is_s2l:
+        return splitted
+    
+    chunk_group = str(resource_id) if resource_id else str(uuid.uuid4())
+    mappings = []
+    out = []
+    for idx, s_text in enumerate(splitted):
+        chunk_id = str(uuid.uuid4())
+        cs = ChunkString(s_text)
+        cs.metadata = {
+            "id": chunk_id,
+            "chunk_id": chunk_id,
+            "chunk_group": chunk_group,
+            "chunk_order": idx
+        }
+        mappings.append({
+            "chunk_id": chunk_id,
+            "chunk_group": chunk_group,
+            "chunk_order": idx,
+            "resource_id": resource_id
+        })
+        out.append(cs)
+    record_chunk_mappings(mappings)
+    return out
 
 
-def load_and_chunk_document(file_path: str):
+def load_and_chunk_document(file_path: str, resource_id: str = None):
     """
     Parse file via parser registry, then apply text splitter.
     Returns list of {text, page_number}.
@@ -141,20 +231,21 @@ def load_and_chunk_document(file_path: str):
     from backend.parsers import parse_document
 
     parsed = parse_document(file_path)
+    splitter = get_active_splitter()
     out = []
     for chunk in parsed:
         page_number = chunk.page_number
         body = chunk.text or ""
         if not body.strip():
             continue
-        for splitted_text in text_splitter.split_text(body):
+        for splitted_text in splitter.split_text(body):
             out.append({
                 "text": splitted_text,
                 "page_number": page_number,
             })
     if not out:
         raise ValueError(f"No text chunks produced for {file_path}")
-    return out
+    return _process_chunks_with_mapping(out, resource_id=resource_id)
 
 
 def update_file_with_backup(content, filename):

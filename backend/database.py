@@ -1,5 +1,6 @@
 # backend/database.py
 import os
+from datetime import datetime
 from typing import AsyncGenerator
 
 from sqlalchemy import create_engine, Column, String, Text, Integer, LargeBinary, DateTime, Float, Boolean
@@ -50,6 +51,23 @@ class ApiCallCountsTable(Base):
     call_type = Column(String, primary_key=True, nullable=False)
     call_count = Column(Integer, nullable=False, default=0)
     last_reset = Column(DateTime, nullable=True)
+
+class ChunkMappingTable(Base):
+    __tablename__ = "chunk_mapping"
+
+    chunk_id = Column(String, primary_key=True, nullable=False)
+    chunk_group = Column(String, nullable=False, index=True)
+    chunk_order = Column(Integer, nullable=False)
+    resource_id = Column(String, nullable=True, index=True)
+
+class DocEmbeddingTable(Base):
+    __tablename__ = "doc_embeddings"
+
+    resource_id = Column(String, primary_key=True, nullable=False)
+    embedding = Column(LargeBinary, nullable=False)
+    dims = Column(Integer, nullable=False, default=1024)
+    chunk_count = Column(Integer, nullable=False, default=1)
+    updated_at = Column(DateTime, default=datetime.utcnow)
 
 # Create synchronous engine for initial setup
 sync_engine = create_engine(

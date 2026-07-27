@@ -39,6 +39,18 @@ async def run_queries(config_name, limit, out_dir_base="eval/results"):
         settings.RERANK_ENABLED = True
     elif config_name == "mmr_off":
         settings.MMR_ENABLED = False
+    elif config_name.startswith("mmr_lambda_"):
+        lambda_val = float(config_name.split("_")[-1])
+        settings.MMR_ENABLED = True
+        settings.MMR_LAMBDA = lambda_val
+    elif config_name == "mmr_same_resource":
+        settings.MMR_ENABLED = True
+        settings.MMR_MODE = "same_resource"
+    elif config_name.startswith("mmr_sr_lambda_"):
+        lambda_val = float(config_name.split("_")[-1])
+        settings.MMR_ENABLED = True
+        settings.MMR_MODE = "same_resource"
+        settings.MMR_LAMBDA = lambda_val
         
     print(f"Running eval with config '{config_name}' (limit={limit})")
     
@@ -119,7 +131,11 @@ async def run_queries(config_name, limit, out_dir_base="eval/results"):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=str, required=True, choices=["default", "hybrid_off", "rerank_on", "mmr_off"])
+    parser.add_argument("--config", type=str, required=True,
+        choices=["default", "hybrid_off", "rerank_on", "mmr_off",
+                 "mmr_lambda_0.7", "mmr_lambda_0.8", "mmr_lambda_0.85",
+                 "mmr_lambda_0.9", "mmr_lambda_0.95", "mmr_lambda_1.0",
+                 "mmr_same_resource", "mmr_sr_lambda_0.7", "mmr_sr_lambda_0.9"])
     parser.add_argument("--limit", type=int, default=None)
     args = parser.parse_args()
     

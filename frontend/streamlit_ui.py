@@ -3,7 +3,7 @@ import ollama
 import asyncio
 from typing import AsyncGenerator
 import time
-import PyPDF2
+from pypdf import PdfReader
 import json
 import re
 import base64
@@ -241,7 +241,7 @@ class OllamaChatApp:
     def extract_text_from_pdf(self, pdf_file):
         """Extract text from PDF file"""
         try:
-            pdf_reader = PyPDF2.PdfReader(pdf_file)
+            pdf_reader = PdfReader(pdf_file)
             text = ""
             for page in pdf_reader.pages:
                 text += page.extract_text()

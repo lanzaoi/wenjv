@@ -2,7 +2,7 @@
 from typing import Optional, List, Dict
 from fastapi_users import schemas
 from datetime import datetime
-from pydantic import HttpUrl, Field
+from pydantic import HttpUrl, Field, ConfigDict
 from backend.config import settings
 
 
@@ -29,8 +29,7 @@ class FileUploadResponse(schemas.BaseModel):
     created_at: datetime
     updated_at: Optional[datetime] = None
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class FileUploadDB(schemas.BaseModel):
@@ -43,8 +42,7 @@ class FileUploadDB(schemas.BaseModel):
     created_at: datetime
     user_id: int
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class LinkBase(schemas.BaseModel):
@@ -69,15 +67,13 @@ class LinkResponse(LinkBase):
     created_at: datetime
     updated_at: Optional[datetime] = None
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class LinkCrawlResponse(LinkBase):
     status: str
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class BulkLinkCreate(schemas.BaseModel):
@@ -89,8 +85,7 @@ class BulkLinkCreate(schemas.BaseModel):
 class BulkLinkResponse(schemas.BaseModel):
     links_added: int
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class DocumentSearchRequest(schemas.BaseModel):
@@ -197,5 +192,4 @@ class JobResponse(schemas.BaseModel):
     started_at: Optional[datetime] = None
     finished_at: Optional[datetime] = None
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)

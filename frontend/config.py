@@ -1,5 +1,6 @@
 # frontend/config.py
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import field_validator
 from typing import Dict
 import os
 import json
@@ -44,23 +45,30 @@ class Settings(BaseSettings):
         "Accept-Language": "en-US,en;q=0.5"
     }
 
-    class Config:
-        env_file = get_env_file_path()
-        env_file_encoding = 'utf-8'
+    model_config = SettingsConfigDict(
+        env_file=get_env_file_path(),
+        env_file_encoding='utf-8',
+    )
 
-        @classmethod
-        def parse_env_var(cls, field_name, raw_val):
-            if field_name == "DEFAULT_HEADERS":
-                try:
-                    return json.loads(raw_val)
-                except json.JSONDecodeError:
-                    return {}
-            elif field_name == "UPLOAD_FILE_TYPES":
-                try:
-                    return json.loads(raw_val)
-                except json.JSONDecodeError:
-                    return [item.strip() for item in raw_val.split(',')]
-            return raw_val
+    @field_validator("DEFAULT_HEADERS", mode="before")
+    @classmethod
+    def parse_headers(cls, v):
+        if isinstance(v, str):
+            try:
+                return json.loads(v)
+            except json.JSONDecodeError:
+                return {}
+        return v
+
+    @field_validator("UPLOAD_FILE_TYPES", mode="before")
+    @classmethod
+    def parse_file_types(cls, v):
+        if isinstance(v, str):
+            try:
+                return json.loads(v)
+            except json.JSONDecodeError:
+                return [item.strip() for item in v.split(',')]
+        return v
 
 
 settings = Settings()

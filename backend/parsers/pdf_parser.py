@@ -48,13 +48,5 @@ class PdfParser:
         return chunks
 
     def _open(self, file_path: str):
-        try:
-            from pypdf import PdfReader  # preferred
-            return PdfReader(file_path)
-        except ImportError:
-            pass
-        try:
-            import PyPDF2
-            return PyPDF2.PdfReader(file_path)
-        except Exception as e:
-            raise ValueError(f"PDF extraction failed: {e}") from e
+        from pypdf import PdfReader
+        return PdfReader(file_path)

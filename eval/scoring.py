@@ -90,5 +90,47 @@ def summarize(per_query_scores: list[dict], k_values: tuple = (5, 10)) -> dict:
     for k in k_values:
         total_rk = sum(s.get(f"recall_at_{k}", 0.0) for s in per_query_scores)
         res[f"Recall@{k}"] = total_rk / n_queries
-        
+
+    # Bootstrap 95% CI for MRR
+    ci = bootstrap_ci(per_query_scores, metric="reciprocal_rank")
+    if ci.get("n", 0) > 0:
+        res[f"MRR@{max_k}_ci95"] = f"[{ci['ci_95_lower']}, {ci['ci_95_upper']}]"
+
     return res
+
+
+_NP_AVAILABLE = True
+try:
+    import numpy as np
+except ImportError:
+    _NP_AVAILABLE = False
+
+
+def bootstrap_ci(per_query_scores, metric="reciprocal_rank", n_bootstrap=1000):
+    """Compute 95% bootstrap confidence interval for a metric.
+
+    Args:
+        per_query_scores: list of dicts from score_hits()
+        metric: key in each dict (e.g. "reciprocal_rank", "recall_at_10")
+        n_bootstrap: number of bootstrap resamples
+
+    Returns:
+        dict with keys: mean, ci_95_lower, ci_95_upper, n
+    """
+    if not _NP_AVAILABLE or not per_query_scores:
+        return {"mean": 0.0, "ci_95_lower": 0.0, "ci_95_upper": 0.0, "n": 0}
+
+    rng = np.random.RandomState(42)
+    values = [s.get(metric, 0.0) for s in per_query_scores]
+    n = len(values)
+    means = []
+    for _ in range(n_bootstrap):
+        sample = rng.choice(values, size=n, replace=True)
+        means.append(float(np.mean(sample)))
+
+    return {
+        "mean": round(float(np.mean(values)), 4),
+        "ci_95_lower": round(float(np.percentile(means, 2.5)), 4),
+        "ci_95_upper": round(float(np.percentile(means, 97.5)), 4),
+        "n": n,
+    }

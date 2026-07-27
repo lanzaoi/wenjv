@@ -1,0 +1,11 @@
+# MMR Lambda Grid (MS MARCO)
+
+| Config | MRR@10 | Recall@5 | Recall@10 | n_queries | n_no_hits | runtime_sec | Status |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `mmr_off` | 0.7110 | 0.9492 | 0.9600 | 200 | 7 | 744.40 | SUCCESS |
+| `mmr_lambda_0.7` | 0.5851 | 0.7042 | 0.7967 | 200 | 37 | 536.60 | SUCCESS |
+| `mmr_lambda_0.8` | 0.6787 | 0.9067 | 0.9383 | 200 | 11 | 4341.39 | SUCCESS |
+| `mmr_lambda_0.85` | 0.6975 | 0.9308 | 0.9533 | 200 | 8 | 136.20 | SUCCESS |
+| `mmr_lambda_0.9` | 0.6975 | 0.9308 | 0.9533 | 200 | 8 | 4.25 | SUCCESS |
+| `mmr_lambda_0.95` | 0.6975 | 0.9308 | 0.9533 | 200 | 8 | 3.06 | SUCCESS |
+| `mmr_lambda_1.0` | 0.6975 | 0.9308 | 0.9533 | 200 | 8 | 3.27 | SUCCESS |

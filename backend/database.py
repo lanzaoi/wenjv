@@ -1,21 +1,65 @@
 # backend/database.py
+import os
 from typing import AsyncGenerator
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, Column, String, Text, Integer, LargeBinary, DateTime, Float, Boolean
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import DeclarativeBase, sessionmaker
+from sqlalchemy.sql import func
 
 from backend.config import settings
 
 # Create base model
-Base = declarative_base()
+class Base(DeclarativeBase):
+    pass
+
+class EmbedCacheTable(Base):
+    __tablename__ = "embed_cache"
+
+    text_hash = Column(String, primary_key=True, nullable=False)
+    model = Column(String, primary_key=True, nullable=False)
+    vector = Column(LargeBinary, nullable=False)
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)
+
+class QueryResultCacheTable(Base):
+    __tablename__ = "query_result_cache"
+
+    query_hash = Column(String, primary_key=True, nullable=False)
+    user_id = Column(Integer, primary_key=True, nullable=False)
+    result_json = Column(Text, nullable=False)
+    expires_at = Column(DateTime, nullable=False)
+
+class QueryLogsTable(Base):
+    __tablename__ = "query_logs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    query = Column(Text, nullable=False)
+    timestamp = Column(DateTime, server_default=func.now(), nullable=False)
+    latency_ms = Column(Float, nullable=False, default=0.0)
+    v_hits = Column(Integer, nullable=False, default=0)
+    fts5_hits = Column(Integer, nullable=False, default=0)
+    s_hits = Column(Integer, nullable=False, default=0)
+    total_hits = Column(Integer, nullable=False, default=0)
+    cache_hit = Column(Boolean, nullable=False, default=False)
+    error = Column(Text, nullable=True)
+
+class ApiCallCountsTable(Base):
+    __tablename__ = "api_call_counts"
+
+    provider = Column(String, primary_key=True, nullable=False)
+    call_type = Column(String, primary_key=True, nullable=False)
+    call_count = Column(Integer, nullable=False, default=0)
+    last_reset = Column(DateTime, nullable=True)
 
 # Create synchronous engine for initial setup
 sync_engine = create_engine(
     settings.DATABASE_URL.replace("+aiosqlite", ""),
     connect_args={"check_same_thread": False}
 )
+
+def get_cache_engine():
+    db_path = getattr(settings, "CACHE_DIR", os.path.join(settings.BASE_DIR, "cache.db"))
+    return create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
 
 # Create async engine for FastAPI
 engine = create_async_engine(

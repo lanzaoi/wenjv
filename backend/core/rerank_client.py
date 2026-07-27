@@ -53,6 +53,12 @@ async def rerank(query: str, documents: list[str]) -> list[dict] | None:
 
     try:
         async with httpx.AsyncClient() as client:
+            try:
+                import asyncio
+                from backend.core.observability import increment_api_count
+                await asyncio.to_thread(increment_api_count, provider, "rerank")
+            except Exception as ex:
+                logger.warning(f"Failed to increment rerank api count: {ex}")
             response = await client.post(url, json=payload, headers=headers, timeout=timeout)
             response.raise_for_status()
             data = response.json()

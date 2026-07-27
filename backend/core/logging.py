@@ -66,7 +66,7 @@ class LogConfig(BaseModel):
 def setup_logging():
     """Configure logging"""
     config = LogConfig()
-    logging.config.dictConfig(config.dict())
+    logging.config.dictConfig(config.model_dump())
 
     # Intercept standard library logging
     logging.getLogger("uvicorn").handlers = []

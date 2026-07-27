@@ -12,6 +12,7 @@ from backend.api.routers import (
     document_router,
     chat_router,
 )
+from backend.api.routers.admin import router as admin_router
 from backend.worker.url_processor_recursive import process_recursive_url_queue
 from backend.worker.durable_jobs import start_job_workers
 from backend.config import settings, is_insecure_default_secret
@@ -56,6 +57,7 @@ app.include_router(link_router, prefix="/links")
 app.include_router(document_router, prefix="/documents")
 app.include_router(job_router, prefix="/jobs")
 app.include_router(chat_router, prefix="/chat")
+app.include_router(admin_router, prefix="/admin")
 
 
 @app.get("/")
@@ -66,6 +68,44 @@ async def root():
 @app.get("/ping")
 async def ping():
     return {"message": "pong"}
+
+
+@app.get("/health")
+async def health():
+    import os, asyncio
+    from sqlalchemy import text
+    from backend.config import settings
+    from backend.database import engine as async_engine
+
+    # DB 探活（异步，不阻塞事件循环）
+    db_status = "unreachable"
+    try:
+        async with async_engine.connect() as conn:
+            await conn.execute(text("SELECT 1"))
+        db_status = "connected"
+    except Exception:
+        pass
+
+    # LanceDB 探活
+    vs_status = "unreachable"
+    try:
+        lance_dir = settings.LANCE_DB_VECTOR_STORE_PERSISTS_DIRECTOY
+        if os.path.isdir(lance_dir):
+            import lancedb
+            db = await asyncio.to_thread(lancedb.connect, lance_dir)
+            tables = await asyncio.to_thread(db.table_names)
+            if settings.VECTOR_STORE_COLLECTION_NAME in tables:
+                vs_status = "ready"
+            else:
+                vs_status = "table_missing"
+    except Exception:
+        pass
+
+    return {
+        "status": "ok" if db_status == "connected" else "degraded",
+        "db": db_status,
+        "vector_store": vs_status,
+    }
 
 
 def start_server():

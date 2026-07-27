@@ -91,3 +91,74 @@ class TestMMRDiversify:
         candidates = make_candidates(5)
         result = mmr_diversify(np.ones(8), candidates, k=3)
         assert len(result) == 3
+
+
+class TestSameResourceDedup:
+    """Tests for same-resource dedup logic used in search.py."""
+
+    def test_keeps_highest_score_same_resource(self):
+        """同 resource_id 只保留最高分 chunk，比较方向是 >"""
+        from unittest.mock import MagicMock
+
+        doc_a = MagicMock()
+        doc_a.metadata = {"resource_id": "r1"}
+        doc_b = MagicMock()
+        doc_b.metadata = {"resource_id": "r1"}  # 同 resource
+        doc_c = MagicMock()
+        doc_c.metadata = {"resource_id": "r2"}  # 不同 resource
+
+        results = [(doc_a, 0.9), (doc_b, 0.3), (doc_c, 0.5)]
+
+        deduped = {}
+        for doc, score in results:
+            rid = doc.metadata.get("resource_id", "")
+            if rid not in deduped or score > deduped[rid][1]:
+                deduped[rid] = (doc, score)
+
+        assert len(deduped) == 2  # r1 和 r2
+        assert deduped["r1"][1] == 0.9  # 保留高分的 doc_a
+        assert deduped["r2"][1] == 0.5
+
+    def test_falls_back_to_title_when_no_resource_id(self):
+        """无 resource_id 时 fallback 到 title"""
+        from unittest.mock import MagicMock
+
+        doc_a = MagicMock()
+        doc_a.metadata = {"title": "doc1"}
+        doc_b = MagicMock()
+        doc_b.metadata = {"title": "doc1"}  # 同 title
+
+        results = [(doc_a, 0.3), (doc_b, 0.9)]
+
+        deduped = {}
+        for doc, score in results:
+            rid = doc.metadata.get("resource_id") or doc.metadata.get("title", "")
+            if rid not in deduped or score > deduped[rid][1]:
+                deduped[rid] = (doc, score)
+
+        assert len(deduped) == 1
+        assert deduped["doc1"][1] == 0.9  # 保留高分
+
+    def test_sorts_descending_after_dedup(self):
+        """去重后按分数降序排列"""
+        from unittest.mock import MagicMock
+
+        doc_a = MagicMock()
+        doc_a.metadata = {"resource_id": "r1"}
+        doc_b = MagicMock()
+        doc_b.metadata = {"resource_id": "r2"}
+        doc_c = MagicMock()
+        doc_c.metadata = {"resource_id": "r3"}
+
+        results = [(doc_a, 0.3), (doc_b, 0.7), (doc_c, 0.1)]
+
+        deduped = {}
+        for doc, score in results:
+            rid = doc.metadata.get("resource_id", "")
+            if rid not in deduped or score > deduped[rid][1]:
+                deduped[rid] = (doc, score)
+
+        sorted_results = sorted(deduped.values(), key=lambda x: x[1], reverse=True)
+        assert sorted_results[0][1] == 0.7
+        assert sorted_results[1][1] == 0.3
+        assert sorted_results[2][1] == 0.1

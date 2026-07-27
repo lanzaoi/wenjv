@@ -163,6 +163,8 @@ _CONFIG_TOGGLE = {
     "hybrid_off": {"HYBRID": False, "RERANK": False, "MMR": True,  "STRUCTURED": True},
     "rerank_on":  {"HYBRID": True,  "RERANK": True,  "MMR": True,  "STRUCTURED": True},
     "mmr_off":    {"HYBRID": True,  "RERANK": False, "MMR": False, "STRUCTURED": True},
+    "mmr_lambda_0.9": {"HYBRID": True, "RERANK": False, "MMR": True, "STRUCTURED": True, "MMR_LAMBDA": 0.9},
+    "mmr_same_resource": {"HYBRID": True, "RERANK": False, "MMR": True, "STRUCTURED": True, "MMR_MODE": "same_resource"},
 }
 
 
@@ -170,14 +172,14 @@ _CONFIG_TOGGLE = {
 def test_monkeypatch_sets_correct_flags(config_name, expected):
     """Verify monkeypatching sets exactly the right config flags."""
     from backend.config import settings
-    from eval.run_eval import run_queries
 
-    # Call the config section directly (not the full async runner)
-    # Simulate what run_queries does:
+    # Reset to baseline
     settings.HYBRID_SEARCH_ENABLED = True
     settings.STRUCTURED_RECALL_ENABLED = True
     settings.MMR_ENABLED = True
     settings.RERANK_ENABLED = False
+    settings.MMR_LAMBDA = 0.7
+    settings.MMR_MODE = "standard"
 
     if config_name == "hybrid_off":
         settings.HYBRID_SEARCH_ENABLED = False
@@ -185,8 +187,18 @@ def test_monkeypatch_sets_correct_flags(config_name, expected):
         settings.RERANK_ENABLED = True
     elif config_name == "mmr_off":
         settings.MMR_ENABLED = False
+    elif config_name.startswith("mmr_lambda_"):
+        settings.MMR_ENABLED = True
+        settings.MMR_LAMBDA = float(config_name.split("_")[-1])
+    elif config_name == "mmr_same_resource":
+        settings.MMR_ENABLED = True
+        settings.MMR_MODE = "same_resource"
 
     assert settings.HYBRID_SEARCH_ENABLED == expected["HYBRID"]
     assert settings.RERANK_ENABLED == expected["RERANK"]
     assert settings.MMR_ENABLED == expected["MMR"]
     assert settings.STRUCTURED_RECALL_ENABLED == expected["STRUCTURED"]
+    if "MMR_LAMBDA" in expected:
+        assert settings.MMR_LAMBDA == expected["MMR_LAMBDA"]
+    if "MMR_MODE" in expected:
+        assert settings.MMR_MODE == expected["MMR_MODE"]

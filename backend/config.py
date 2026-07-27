@@ -1,6 +1,6 @@
 # backend/config.py
-from pydantic_settings import BaseSettings
-from pydantic import model_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import model_validator, field_validator
 from pathlib import Path
 from typing import Dict
 from backend.vector_store.models import StoreEngine
@@ -101,9 +101,9 @@ class Settings(BaseSettings):
     VECTOR_STORE_COLLECTION_NAME: str = "document_store"
 
     # Modify and use different embedding model if needed
-    # Note: For cloud demonstration, use EMBEDDINGS_DIMENSION=1024 when EMBEDDINGS_MODEL="bge-m3"
-    EMBEDDINGS_MODEL: str = "chroma/all-minilm-l6-v2-f32"
-    EMBEDDINGS_DIMENSION: int = 384
+    # Use "chroma/all-minilm-l6-v2-f32" & 384 for local-only deployment
+    EMBEDDINGS_MODEL: str = "BAAI/bge-m3"
+    EMBEDDINGS_DIMENSION: int = 1024
     
     # Dual Provider Settings (B0)
     EMBEDDING_PROVIDER: str = "ollama"
@@ -139,11 +139,37 @@ class Settings(BaseSettings):
     # MMR
     MMR_ENABLED: bool = True
     MMR_LAMBDA: float = 0.7
+    MMR_MODE: str = "standard"  # "standard" | "same_resource"
 
     # Structured Recall
     STRUCTURED_RECALL_ENABLED: bool = True
     HYBRID_RRF_WEIGHT_STRUCTURED: float = 1.0
     STRUCTURED_RECALL_LIMIT: int = 20
+
+    # Caching Layer (1.4)
+    EMBEDDING_CACHE_ENABLED: bool = True
+    QUERY_CACHE_ENABLED: bool = True
+    QUERY_CACHE_TTL_SECONDS: int = 300
+    CACHE_DIR: str = os.path.join(BASE_DIR, "cache.db")
+
+    # Observability Layer (1.4)
+    ADMIN_ENABLED: bool = True
+    OBS_ALERT_FTS5_ZERO_HIT_THRESHOLD: int = 10
+    OBS_ALERT_FTS5_ZERO_HIT_STREAK: int = 10
+    OBS_ALERT_LATENCY_STREAK: int = 5
+    OBS_ALERT_LATENCY_THRESHOLD_MS: float = 5000.0
+    OBS_ALERT_ERROR_STREAK_THRESHOLD: int = 5
+    OBS_ALERT_ERROR_STREAK: int = 5
+    OBS_ALERT_COOLDOWN_SECONDS: int = 300
+    OBS_LOG_RETENTION_DAYS: int = 30
+
+    # Query Understanding Layer (1.4)
+    QUERY_CLASSIFIER_ENABLED: bool = False
+    QUERY_CLASSIFIER_SHORT_BOOST: float = 2.0
+    QUERY_CLASSIFIER_SHORT_KEYWORD_BOOST: float = 2.0
+    QUERY_CLASSIFIER_LONG_BOOST: float = 2.0
+    QUERY_CLASSIFIER_LONG_QUESTION_BOOST: float = 2.0
+    QUERY_CLASSIFIER_MAX_WEIGHT: float = 5.0
 
     # OCR (AI Studio v2 async)
     OCR_MODE: str = "off"
@@ -157,6 +183,7 @@ class Settings(BaseSettings):
 
     TEXT_SPLITTER_CHUNK_SIZE:  int = 1500
     TEXT_SPLITTER_CHUNK_OVERLAP:  int = 150
+    TEXT_SPLITTER_SEPARATORS: list[str] = ["\n\n", "\n", "。", "，", " ", ""]
 
     # Modify if needed to use other relational DB
     DATABASE_URL: str = f"sqlite+aiosqlite:///{SQLITE_DB_PATH}"
@@ -184,28 +211,41 @@ class Settings(BaseSettings):
     LOG_FORMAT: str = "<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>"
     LOG_LEVEL: str = "INFO"
 
-    class Config:
-        env_file = get_env_file_path()
-        env_file_encoding = 'utf-8'
+    model_config = SettingsConfigDict(
+        env_file=get_env_file_path(),
+        env_file_encoding='utf-8',
+    )
 
-        @classmethod
-        def parse_env_var(cls, field_name, raw_val):
-            if field_name == "DEFAULT_HEADERS":
-                try:
-                    return json.loads(raw_val)
-                except json.JSONDecodeError:
-                    return {}
-            elif field_name == "CORS_ORIGINS":
-                try:
-                    return json.loads(raw_val)
-                except json.JSONDecodeError:
-                    return [item.strip() for item in raw_val.split(',')]
-            elif field_name == "ALLOWED_UPLOAD_EXTENSIONS":
-                try:
-                    return json.loads(raw_val)
-                except json.JSONDecodeError:
-                    return [item.strip().lstrip('.') for item in raw_val.split(',') if item.strip()]
-            return raw_val
+    @field_validator("DEFAULT_HEADERS", mode="before")
+    @classmethod
+    def parse_headers(cls, v):
+        if isinstance(v, str):
+            try:
+                return json.loads(v)
+            except json.JSONDecodeError:
+                return {}
+        return v
+
+    @field_validator("CORS_ORIGINS", mode="before")
+    @classmethod
+    def parse_cors(cls, v):
+        if isinstance(v, str):
+            try:
+                return json.loads(v)
+            except json.JSONDecodeError:
+                return [item.strip() for item in v.split(',')]
+        return v
+
+    @field_validator("ALLOWED_UPLOAD_EXTENSIONS", mode="before")
+    @classmethod
+    def parse_extensions(cls, v):
+        """保留 .lstrip('.') 行为：用户可在 env 里写 .pdf, .md"""
+        if isinstance(v, str):
+            try:
+                return json.loads(v)
+            except json.JSONDecodeError:
+                return [item.strip().lstrip('.') for item in v.split(',') if item.strip()]
+        return v
 
 
 settings = Settings()

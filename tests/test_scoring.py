@@ -258,3 +258,42 @@ def test_summarize_custom_k_values():
     assert s["Recall@20"] == 1.0
     assert s["n_no_hits"] == 0  # hit_at_20=True
 
+
+# ─── bootstrap_ci ───
+
+def test_bootstrap_ci_empty():
+    from eval.scoring import bootstrap_ci
+    result = bootstrap_ci([], metric="reciprocal_rank")
+    assert result["mean"] == 0.0
+    assert result["n"] == 0
+
+
+def test_bootstrap_ci_basic():
+    from eval.scoring import bootstrap_ci
+    scores = [
+        {"reciprocal_rank": 1.0},
+        {"reciprocal_rank": 0.5},
+        {"reciprocal_rank": 0.0},
+    ]
+    result = bootstrap_ci(scores, metric="reciprocal_rank")
+    assert "mean" in result
+    assert "ci_95_lower" in result
+    assert "ci_95_upper" in result
+    assert result["n"] == 3
+    # CI should contain the mean
+    assert result["ci_95_lower"] <= result["mean"] <= result["ci_95_upper"]
+
+
+def test_bootstrap_ci_all_same():
+    from eval.scoring import bootstrap_ci
+    scores = [{"reciprocal_rank": 0.5}] * 100
+    result = bootstrap_ci(scores, metric="reciprocal_rank")
+    # All same → CI should be tight
+    assert abs(result["ci_95_upper"] - result["ci_95_lower"]) < 0.01
+
+
+def test_summarize_includes_bootstrap_ci():
+    from eval.scoring import summarize
+    scores = [{"reciprocal_rank": 1.0, "recall_at_5": 1.0, "recall_at_10": 1.0, "hit_at_10": True}]
+    s = summarize(scores)
+    assert "MRR@10_ci95" in s

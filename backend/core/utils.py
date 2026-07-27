@@ -1,4 +1,4 @@
-import PyPDF2
+from pypdf import PdfReader
 import mimetypes
 import uuid
 import os
@@ -15,7 +15,7 @@ text_splitter = RecursiveCharacterTextSplitter(
     chunk_size=settings.TEXT_SPLITTER_CHUNK_SIZE,
     chunk_overlap=settings.TEXT_SPLITTER_CHUNK_OVERLAP,
     length_function=len,
-    separators=["\n\n", "\n", " ", ""]
+    separators=settings.TEXT_SPLITTER_SEPARATORS
 )
 
 
@@ -83,7 +83,7 @@ def extract_text_from_pdf(pdf_file):
     """Extract text from PDF file. Raises ValueError on failure/empty text."""
     texts = []
     try:
-        pdf_reader = PyPDF2.PdfReader(pdf_file)
+        pdf_reader = PdfReader(pdf_file)
         for i, page in enumerate(pdf_reader.pages):
             page_text = page.extract_text() or ""
             texts.append({

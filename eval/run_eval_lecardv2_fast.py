@@ -30,7 +30,20 @@ async def run_fast(config_name, lance_dir, n_queries=20):
     settings.MMR_ENABLED = False
     settings.RERANK_ENABLED = False
 
-    if config_name == "mmr_same_resource":
+    if config_name == "vector_only":
+        settings.HYBRID_SEARCH_ENABLED = False
+        settings.STRUCTURED_RECALL_ENABLED = False
+    elif config_name == "hybrid_only":
+        settings.HYBRID_SEARCH_ENABLED = True
+        settings.STRUCTURED_RECALL_ENABLED = True
+        settings.RERANK_ENABLED = False
+    elif config_name == "hybrid_rerank":
+        settings.HYBRID_SEARCH_ENABLED = True
+        settings.STRUCTURED_RECALL_ENABLED = True
+        settings.RERANK_ENABLED = True
+        settings.RERANK_API_KEY = settings.EMBEDDING_API_KEY
+        settings.RERANK_API_BASE = "https://api.siliconflow.cn/v1"
+    elif config_name == "mmr_same_resource":
         settings.MMR_ENABLED = True
         settings.MMR_MODE = "same_resource"
         settings.MMR_LAMBDA = 0.85
@@ -72,7 +85,7 @@ async def run_fast(config_name, lance_dir, n_queries=20):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=str, required=True, choices=["mmr_off", "mmr_standard", "mmr_same_resource", "mmr_lambda_0.85"])
+    parser.add_argument("--config", type=str, required=True, choices=["vector_only", "hybrid_only", "hybrid_rerank", "mmr_off", "mmr_standard", "mmr_same_resource", "mmr_lambda_0.85"])
     parser.add_argument("--lance_dir", type=str, default="eval/experiment_lance_db_lecardv2")
     parser.add_argument("--n_queries", type=int, default=20)
     args = parser.parse_args()

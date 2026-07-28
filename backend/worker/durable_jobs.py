@@ -179,14 +179,33 @@ async def reclaim_stale_jobs(session: AsyncSession) -> int:
 
 
 async def claim_next_job(session: AsyncSession) -> Optional[IngestionJob]:
-    """Claim one pending job (SQLite-friendly: select then update)."""
-    result = await session.execute(
-        select(IngestionJob)
-        .where(IngestionJob.status == JobStatus.PENDING)
-        .order_by(IngestionJob.id.asc())
-        .limit(1)
-    )
-    job = result.scalars().first()
+    """Claim one pending job (SQLite-friendly: select then update).
+
+    Prefer file/link over bulk note backlog so interactive uploads are not
+    starved behind eval dumps.
+    """
+    # 1) interactive types first
+    for preferred in (JobType.FILE, JobType.LINK):
+        result = await session.execute(
+            select(IngestionJob)
+            .where(
+                IngestionJob.status == JobStatus.PENDING,
+                IngestionJob.job_type == preferred,
+            )
+            .order_by(IngestionJob.id.asc())
+            .limit(1)
+        )
+        job = result.scalars().first()
+        if job:
+            break
+    else:
+        result = await session.execute(
+            select(IngestionJob)
+            .where(IngestionJob.status == JobStatus.PENDING)
+            .order_by(IngestionJob.id.asc())
+            .limit(1)
+        )
+        job = result.scalars().first()
     if not job:
         return None
 
@@ -247,58 +266,210 @@ async def _execute_document(session: AsyncSession, job: IngestionJob, payload: d
     await _mark_resource_status(session, job, ProcessingStatus.IN_PROGRESS, None)
     await session.commit()
 
-    from backend.parsers import parse_document
-    from backend.config import settings
-    from backend.core.ocr_client import ocr_image_bytes
-    from backend.core.pdf_render import render_pdf_pages
-    import os
+    # 1. Parse document first (audio and images handled separately)
+    audio_exts = {".mp3", ".m4a", ".wav", ".mpeg", ".mpga", ".webm"}
+    image_exts = {".png", ".jpg", ".jpeg"}
+    lower_name = file_name.lower()
+    is_audio = any(lower_name.endswith(e) for e in audio_exts)
+    is_image = any(lower_name.endswith(e) for e in image_exts)
 
-    # 1. Parse document first
-    parsed = await asyncio.to_thread(parse_document, file_path)
-    total_chars = sum(len(c.text or "") for c in parsed)
-    
-    # 2. Check if OCR is needed
-    ocr_mode = getattr(settings, "OCR_MODE", "off")
-    need_ocr = False
-    
-    if ocr_mode == "always":
-        need_ocr = True
-    elif ocr_mode == "auto":
-        ocr_min_chars = getattr(settings, "OCR_MIN_CHARS", 40)
-        if total_chars < ocr_min_chars:
-            need_ocr = True
-
-    # 3. Apply OCR if needed and it's a PDF
-    if need_ocr and file_name.lower().endswith(".pdf"):
-        try:
-            max_pages = getattr(settings, "OCR_MAX_PAGES", 30)
-            png_bytes_list = await asyncio.to_thread(render_pdf_pages, file_path, max_pages)
-            
-            ocr_texts = []
-            for png in png_bytes_list:
-                text = await ocr_image_bytes(png)
-                if text:
-                    ocr_texts.append(text)
-                    
-            if ocr_texts:
-                combined_ocr = "\n\n".join(ocr_texts)
-                original_text = "\n\n".join((c.text or "") for c in parsed)
-                final_text = original_text + "\n\n---\n\n" + combined_ocr
-                
-                # Write to a temporary markdown file to avoid re-parsing as PDF
-                temp_file = file_path + ".ocr.md"
-                def _write_temp():
-                    with open(temp_file, "w", encoding="utf-8") as f:
-                        f.write(final_text)
-                await asyncio.to_thread(_write_temp)
-                
-                # Redirect file_path so load_and_chunk_document treats it as markdown
-                file_path = temp_file
-                
-        except Exception as e:
-            logger.error(f"OCR failed for {file_name}: {e}")
-            await _mark_resource_failed(session, job, f"OCR extraction failed: {str(e)}")
+    if is_image:
+        if not getattr(settings, "IMAGE_INGEST_ENABLED", True):
+            await _mark_resource_failed(
+                session, job, "Image upload requires IMAGE_INGEST_ENABLED=true"
+            )
             return
+        try:
+            from backend.core.image_ingest import extract_text_from_image_bytes, ImageExtractionError
+
+            def _read_img():
+                with open(file_path, "rb") as f:
+                    return f.read()
+
+            raw = await asyncio.to_thread(_read_img)
+            text = await extract_text_from_image_bytes(raw, filename=file_name)
+            
+            temp_file = file_path + ".img.md"
+            header = f"# Image: {file_name}\n\n"
+            body = header + text
+
+            def _write_img():
+                with open(temp_file, "w", encoding="utf-8") as f:
+                    f.write(body)
+
+            await asyncio.to_thread(_write_img)
+            file_path = temp_file
+            file_name = file_name + ".md"
+        except ImageExtractionError as e:
+            logger.error(f"Image extraction failed for {file_name}: {e}")
+            await _mark_resource_failed(session, job, f"Image extraction failed: {e}")
+            return
+        except Exception as e:
+            logger.error(f"Image ingestion error for {file_name}: {e}")
+            await _mark_resource_failed(session, job, f"Image ingestion error: {e}")
+            return
+    elif is_audio:
+        if not getattr(settings, "AUDIO_ASR_ENABLED", False):
+            await _mark_resource_failed(
+                session, job, "audio upload requires AUDIO_ASR_ENABLED=true"
+            )
+            return
+        try:
+            from backend.core.asr_client import transcribe_audio_bytes, ASRError
+
+            def _read():
+                with open(file_path, "rb") as f:
+                    return f.read()
+
+            raw = await asyncio.to_thread(_read)
+            text = await transcribe_audio_bytes(raw, filename=file_name)
+            if not (text or "").strip():
+                await _mark_resource_failed(session, job, "ASR returned empty transcript")
+                return
+            temp_file = file_path + ".asr.md"
+            header = f"# Transcript: {file_name}\n\n"
+            body = header + text.strip()
+
+            def _write():
+                with open(temp_file, "w", encoding="utf-8") as f:
+                    f.write(body)
+
+            await asyncio.to_thread(_write)
+            file_path = temp_file
+            file_name = file_name + ".md"
+        except Exception as e:
+            logger.error(f"ASR failed for {file_name}: {e}")
+            await _mark_resource_failed(session, job, f"ASR failed: {e}")
+            return
+    else:
+        from backend.parsers import parse_document
+
+        try:
+            parsed = await asyncio.to_thread(parse_document, file_path)
+            total_chars = sum(len(c.text or "") for c in parsed)
+        except ValueError as ve:
+            # PPTX with no text: try OCR enrichment before failing
+            if lower_name.endswith(".pptx") and (
+                getattr(settings, "PPTX_OCR_EMPTY_SLIDES", False)
+                or getattr(settings, "MULTIMODAL_ENABLED", False)
+            ):
+                from backend.core.pptx_ocr import enrich_pptx_chunks_with_ocr
+                from langchain.schema import Document
+
+                try:
+                    extra = await enrich_pptx_chunks_with_ocr(file_path, existing_text_chars=0)
+                except Exception as ocr_e:
+                    logger.warning(f"pptx OCR fail-open: {ocr_e}")
+                    extra = []
+                if not extra:
+                    await _mark_resource_failed(session, job, str(ve))
+                    return
+                docs = [
+                    Document(
+                        page_content=c.text,
+                        metadata={
+                            "source": file_url,
+                            "filename": file_name,
+                            "page": str(c.page_number or ""),
+                            "belongs_to": job.user_email,
+                            "user_id": str(job.user_id) if job.user_id is not None else None,
+                            "file_id": str(job.resource_id),
+                            "resource_id": str(job.resource_id),
+                            "source_type": "file",
+                            **(c.meta or {}),
+                        },
+                    )
+                    for c in extra
+                ]
+                await asyncio.to_thread(vector_store.add_documents, docs)
+                await _mark_resource_status(session, job, ProcessingStatus.FINISHED, None)
+                return
+            raise
+        else:
+            # Thin-text PPTX: optional OCR append (fail-open)
+            if lower_name.endswith(".pptx") and (
+                getattr(settings, "PPTX_OCR_EMPTY_SLIDES", False)
+                or getattr(settings, "MULTIMODAL_ENABLED", False)
+            ):
+                try:
+                    from backend.core.pptx_ocr import enrich_pptx_chunks_with_ocr
+                    from langchain.schema import Document
+
+                    extra = await enrich_pptx_chunks_with_ocr(
+                        file_path, existing_text_chars=total_chars
+                    )
+                    if extra:
+                        docs = [
+                            Document(
+                                page_content=c.text,
+                                metadata={
+                                    "source": file_url,
+                                    "filename": file_name,
+                                    "page": str(c.page_number or ""),
+                                    "belongs_to": job.user_email,
+                                    "user_id": str(job.user_id)
+                                    if job.user_id is not None
+                                    else None,
+                                    "file_id": str(job.resource_id),
+                                    "resource_id": str(job.resource_id),
+                                    "source_type": "file",
+                                    **(c.meta or {}),
+                                },
+                            )
+                            for c in extra
+                        ]
+                        await asyncio.to_thread(vector_store.add_documents, docs)
+                except Exception as ocr_e:
+                    logger.warning(f"pptx OCR enrich fail-open: {ocr_e}")
+
+            # 2. Check if OCR is needed (PDF path below)
+            ocr_mode = getattr(settings, "OCR_MODE", "off")
+            need_ocr = False
+
+            if ocr_mode == "always":
+                need_ocr = True
+            elif ocr_mode == "auto":
+                ocr_min_chars = getattr(settings, "OCR_MIN_CHARS", 40)
+                if total_chars < ocr_min_chars:
+                    need_ocr = True
+
+            # 3. Apply OCR if needed and it's a PDF
+            if need_ocr and lower_name.endswith(".pdf"):
+                try:
+                    from backend.core.ocr_client import ocr_image_bytes
+                    from backend.core.pdf_render import render_pdf_pages
+
+                    max_pages = getattr(settings, "OCR_MAX_PAGES", 30)
+                    png_bytes_list = await asyncio.to_thread(
+                        render_pdf_pages, file_path, max_pages
+                    )
+
+                    ocr_texts = []
+                    for png in png_bytes_list:
+                        text = await ocr_image_bytes(png)
+                        if text:
+                            ocr_texts.append(text)
+
+                    if ocr_texts:
+                        combined_ocr = "\n\n".join(ocr_texts)
+                        original_text = "\n\n".join((c.text or "") for c in parsed)
+                        final_text = original_text + "\n\n---\n\n" + combined_ocr
+
+                        temp_file = file_path + ".ocr.md"
+
+                        def _write_temp():
+                            with open(temp_file, "w", encoding="utf-8") as f:
+                                f.write(final_text)
+
+                        await asyncio.to_thread(_write_temp)
+                        file_path = temp_file
+
+                except Exception as e:
+                    logger.error(f"OCR failed for {file_name}: {e}")
+                    await _mark_resource_failed(
+                        session, job, f"OCR extraction failed: {str(e)}"
+                    )
+                    return
 
     # 4. Finally pass to vector store
     await asyncio.to_thread(
@@ -311,7 +482,7 @@ async def _execute_document(session: AsyncSession, job: IngestionJob, payload: d
         job.user_id,
     )
 
-    if file_name.lower().endswith(".pdf") and settings.MULTIMODAL_ENABLED:
+    if lower_name.endswith(".pdf") and settings.MULTIMODAL_ENABLED:
         try:
             from backend.core.multimodal import process_pdf_images, process_pdf_tables
             img_docs = await process_pdf_images(file_path, str(job.resource_id))

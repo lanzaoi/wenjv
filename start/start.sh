@@ -1,28 +1,38 @@
 #!/bin/bash
-# start.sh
+# start.sh — backend + Vue SPA (web/)
+set -euo pipefail
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$ROOT"
 
-# Start FastAPI in the background
-uvicorn backend.main:app --reload --port 8000 --log-level debug &
+API_URL="${API_URL:-http://127.0.0.1:8000}"
+BACKEND_PORT="${BACKEND_PORT:-8000}"
+FRONTEND_PORT="${FRONTEND_PORT:-5173}"
+
+uvicorn backend.main:app --reload --host 127.0.0.1 --port "$BACKEND_PORT" --log-level info &
 FASTAPI_PID=$!
 
-# Wait a moment for FastAPI to start
-sleep 5
-
-# Start Streamlit in the background
-streamlit run frontend/app.py
-STREAMLIT_PID=$!
-
-# Function to handle termination
 cleanup() {
-    echo "Shutting down services..."
-    kill $FASTAPI_PID
-    kill $STREAMLIT_PID
-    exit 0
+  echo "Shutting down services..."
+  kill "$FASTAPI_PID" 2>/dev/null || true
+  kill "$VITE_PID" 2>/dev/null || true
+  exit 0
 }
-
-# Set up trap for clean termination
 trap cleanup SIGINT SIGTERM
 
-# Keep script running
-echo "Services started. Press Ctrl+C to stop."
+for i in $(seq 1 60); do
+  if curl -sf "$API_URL/ping" >/dev/null 2>&1 || curl -sf "http://127.0.0.1:$BACKEND_PORT/ping" >/dev/null 2>&1; then
+    break
+  fi
+  sleep 1
+done
+
+export VITE_PROXY_TARGET="http://127.0.0.1:$BACKEND_PORT"
+(
+  cd web
+  npm run dev -- --host 127.0.0.1 --port "$FRONTEND_PORT"
+) &
+VITE_PID=$!
+
+echo "Backend:  http://127.0.0.1:$BACKEND_PORT"
+echo "Frontend: http://127.0.0.1:$FRONTEND_PORT"
 wait

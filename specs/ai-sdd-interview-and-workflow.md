@@ -46,7 +46,7 @@ Specify  →  Plan  →  Implement  →  Verify  →  (Update specs)
 |------|----------|-----------|------------|
 | Specify | 写清目标、非目标、验收 | 可帮起草，你拍板 | `specs/*.md` |
 | Plan | 拆 2–5 分钟级任务 | 写 plan 文件 | `.hermes/plans/*` |
-| Implement | 一次只开一个 Task | 改指定路径 | `backend/` `frontend/` |
+| Implement | 一次只开一个 Task | 改指定路径 | `backend/` `web/` |
 | Verify | 规定命令与期望 | 跑测、修到绿 | `pytest`、ad-hoc、Redoc |
 | Update | 行为变了就改 spec | 提醒你同步文档 | `specs/` + README |
 

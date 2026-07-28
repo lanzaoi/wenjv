@@ -1,6 +1,7 @@
+"""PPTX helpers: text parse + optional image OCR enrichment (fail-open)."""
 from __future__ import annotations
 
-from typing import List
+from typing import List, Tuple
 
 from backend.parsers.base import ParsedChunk, extension_of
 
@@ -38,3 +39,30 @@ class PptxParser:
         if not chunks:
             raise ValueError("PPTX has no extractable text")
         return chunks
+
+
+def extract_pptx_image_blobs(file_path: str, max_images: int = 20) -> List[bytes]:
+    """Best-effort extract embedded picture bytes from a PPTX (sync)."""
+    try:
+        from pptx import Presentation
+        from pptx.enum.shapes import MSO_SHAPE_TYPE
+    except ImportError:
+        return []
+
+    blobs: List[bytes] = []
+    try:
+        prs = Presentation(file_path)
+        for slide in prs.slides:
+            for shape in slide.shapes:
+                try:
+                    if shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
+                        blob = shape.image.blob
+                        if blob:
+                            blobs.append(blob)
+                            if len(blobs) >= max_images:
+                                return blobs
+                except Exception:
+                    continue
+    except Exception:
+        return blobs
+    return blobs

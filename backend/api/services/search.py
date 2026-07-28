@@ -173,6 +173,7 @@ async def search_documents(
     score is engine-native distance/similarity — see RAG notes in UPGRADE_ROADMAP.
     """
     start_time = time.perf_counter()
+    timings = {}
     v_hits = 0
     fts5_hits = 0
     s_hits = 0
@@ -183,7 +184,11 @@ async def search_documents(
     try:
         uid = _resolve_user_id(user_id, user_email)
         query_hash = _compute_query_hash(prompt, include_sources, exclude_sources, source_type, window_size)
+        
+        t0 = time.perf_counter()
         cached_docs = _get_query_cache(query_hash, uid)
+        timings["query_cache"] = (time.perf_counter() - t0) * 1000.0
+        
         if cached_docs is not None:
             cache_hit = True
             total_hits = len(cached_docs[:window_size])
@@ -211,127 +216,169 @@ async def search_documents(
         kwargs["window_size"] = fetch_limit
 
         # Backends that accept user_id (Lance) will use it; others ignore via TypeError fallback
-        try:
-            vector_results = vector_store.fetch_documents(**kwargs, user_id=user_id)
-        except TypeError:
-            vector_results = vector_store.fetch_documents(
-                include_sources,
-                exclude_sources,
-                fetch_limit,
-                user_email,
-                prompt,
-                source_type,
-            )
+        def _do_vector():
+            t0 = time.perf_counter()
+            try:
+                res = vector_store.fetch_documents(**kwargs, user_id=user_id)
+            except TypeError:
+                res = vector_store.fetch_documents(
+                    include_sources,
+                    exclude_sources,
+                    fetch_limit,
+                    user_email,
+                    prompt,
+                    source_type,
+                )
+            timings["vector_leg"] = (time.perf_counter() - t0) * 1000.0
+            return res
+
+        # ----- L2: 词法列表 K -----
+        backend_mode = getattr(settings, "HYBRID_KEYWORD_BACKEND", "fts5")
+
+        def _fetch_like():
+            if not hasattr(vector_store, "fetch_documents_keyword"):
+                return []
+            try:
+                return vector_store.fetch_documents_keyword(**kwargs, user_id=user_id)
+            except Exception:
+                return []
+
+        def _fetch_fts5():
+            try:
+                from backend.database import sync_engine
+                from backend.core.fts5_utils import match_fts5
+                from langchain.schema import Document
+                
+                uid = user_id
+                if uid is None and user_email:
+                    # Resolve real user_id to avoid FTS isolation breach or paralysis 
+                    from sqlalchemy.orm import Session
+                    from backend.api.models import User
+                    try:
+                        with Session(sync_engine) as session:
+                            u = session.query(User).filter(User.email == user_email).first()
+                            if u:
+                                uid = u.id
+                    except Exception as e:
+                        import traceback
+                        traceback.print_exc()
+                
+                if uid is None:
+                    return []
+                
+                # Multiply fetch limit for keywords if set
+                multiplier = getattr(settings, "SEARCH_FETCH_MULTIPLIER", 1)
+                
+                with sync_engine.connect() as conn:
+                    raw_conn = conn.connection.dbapi_connection
+                    rows = match_fts5(raw_conn, prompt, user_id=uid, belongs_to=user_email, limit=fetch_limit * 5 * multiplier)
+                    
+                docs = []
+                for row in rows:
+                    metadata = {
+                        "id": row.get("chunk_id"),
+                        "title": row.get("title"),
+                        "filename": row.get("filename"),
+                        "source_type": row.get("source_type"),
+                        "user_id": row.get("user_id"),
+                        "link_id": row.get("link_id")
+                    }
+                    metadata = {k: v for k, v in metadata.items() if v is not None}
+                    
+                    doc = Document(page_content=row.get("page_content", ""), metadata=metadata)
+                    docs.append((doc, 0.0))
+                return docs
+            except Exception:
+                import traceback
+                traceback.print_exc()
+                return []
+
+        def _fetch_structured():
+            if not getattr(settings, "STRUCTURED_RECALL_ENABLED", False):
+                return []
+            
+            try:
+                uid = user_id
+                if uid is None and user_email:
+                    from sqlalchemy.orm import Session
+                    from backend.database import sync_engine
+                    from backend.api.models import User
+                    with Session(sync_engine) as session:
+                        u = session.query(User).filter(User.email == user_email).first()
+                        if u:
+                            uid = u.id
+                
+                if uid is None:
+                    return []
+                    
+                structured_limit = getattr(settings, "STRUCTURED_RECALL_LIMIT", 20)
+                multiplier = getattr(settings, "SEARCH_FETCH_MULTIPLIER", 1)
+                resources = search_resources(prompt, uid, limit=structured_limit * multiplier)
+                
+                docs = []
+                for res in resources:
+                    # fetch chunks from lance
+                    chunks = fetch_documents_by_resource(
+                        resource_id=res["resource_id"], 
+                        source_type=res["source_type"],
+                        user_id=uid,
+                        username=user_email
+                    )
+                    docs.extend(chunks)
+                    
+                return docs
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                return []
+
+        if getattr(settings, "SEARCH_PARALLEL_LEGS", True):
+            # Parallel execution
+            tasks = [asyncio.to_thread(_do_vector)]
+            if getattr(settings, "HYBRID_SEARCH_ENABLED", False):
+                def _do_keyword():
+                    t0 = time.perf_counter()
+                    res = _fetch_like() if backend_mode == "like" else _fetch_fts5()
+                    timings["keyword_leg"] = (time.perf_counter() - t0) * 1000.0
+                    return res
+                    
+                def _do_structured():
+                    t0 = time.perf_counter()
+                    res = _fetch_structured()
+                    timings["structured_leg"] = (time.perf_counter() - t0) * 1000.0
+                    return res
+                    
+                tasks.append(asyncio.to_thread(_do_keyword))
+                tasks.append(asyncio.to_thread(_do_structured))
+            
+            gathered = await asyncio.gather(*tasks, return_exceptions=True)
+            if isinstance(gathered[0], Exception):
+                raise gathered[0]
+            vector_results = gathered[0]
+            
+            if getattr(settings, "HYBRID_SEARCH_ENABLED", False):
+                kw_results = gathered[1] if not isinstance(gathered[1], Exception) else []
+                structured_results = gathered[2] if not isinstance(gathered[2], Exception) else []
+        else:
+            # Sequential execution
+            vector_results = _do_vector()
+            if getattr(settings, "HYBRID_SEARCH_ENABLED", False):
+                t0 = time.perf_counter()
+                if backend_mode == "like":
+                    kw_results = _fetch_like()
+                else:
+                    kw_results = _fetch_fts5()
+                timings["keyword_leg"] = (time.perf_counter() - t0) * 1000.0
+                
+                t0 = time.perf_counter()
+                structured_results = _fetch_structured()
+                timings["structured_leg"] = (time.perf_counter() - t0) * 1000.0
 
         if not getattr(settings, "HYBRID_SEARCH_ENABLED", False):
             final_results = vector_results
             v_hits = len({_get_stable_id(doc) for doc, _ in vector_results})
             total_hits = len(final_results)
         else:
-            # ----- L2: 词法列表 K -----
-            backend_mode = getattr(settings, "HYBRID_KEYWORD_BACKEND", "fts5")
-
-            def _fetch_like():
-                if not hasattr(vector_store, "fetch_documents_keyword"):
-                    return []
-                try:
-                    return vector_store.fetch_documents_keyword(**kwargs, user_id=user_id)
-                except Exception:
-                    return []
-
-            def _fetch_fts5():
-                try:
-                    from backend.database import sync_engine
-                    from backend.core.fts5_utils import match_fts5
-                    from langchain.schema import Document
-                    
-                    uid = user_id
-                    if uid is None and user_email:
-                        # Resolve real user_id to avoid FTS isolation breach or paralysis 
-                        from sqlalchemy.orm import Session
-                        from backend.api.models import User
-                        try:
-                            with Session(sync_engine) as session:
-                                u = session.query(User).filter(User.email == user_email).first()
-                                if u:
-                                    uid = u.id
-                        except Exception as e:
-                            import traceback
-                            traceback.print_exc()
-                    
-                    if uid is None:
-                        return []
-                    
-                    with sync_engine.connect() as conn:
-                        raw_conn = conn.connection.dbapi_connection
-                        rows = match_fts5(raw_conn, prompt, user_id=uid, belongs_to=user_email, limit=fetch_limit * 5)
-                        
-                    docs = []
-                    for row in rows:
-                        metadata = {
-                            "id": row.get("chunk_id"),
-                            "title": row.get("title"),
-                            "filename": row.get("filename"),
-                            "source_type": row.get("source_type"),
-                            "user_id": row.get("user_id"),
-                            "link_id": row.get("link_id")
-                        }
-                        metadata = {k: v for k, v in metadata.items() if v is not None}
-                        
-                        doc = Document(page_content=row.get("page_content", ""), metadata=metadata)
-                        docs.append((doc, 0.0))
-                    return docs
-                except Exception:
-                    import traceback
-                    traceback.print_exc()
-                    return []
-
-            def _fetch_structured():
-                if not getattr(settings, "STRUCTURED_RECALL_ENABLED", False):
-                    return []
-                
-                try:
-                    uid = user_id
-                    if uid is None and user_email:
-                        from sqlalchemy.orm import Session
-                        from backend.database import sync_engine
-                        from backend.api.models import User
-                        with Session(sync_engine) as session:
-                            u = session.query(User).filter(User.email == user_email).first()
-                            if u:
-                                uid = u.id
-                    
-                    if uid is None:
-                        return []
-                        
-                    structured_limit = getattr(settings, "STRUCTURED_RECALL_LIMIT", 20)
-                    resources = search_resources(prompt, uid, limit=structured_limit)
-                    
-                    docs = []
-                    for res in resources:
-                        # fetch chunks from lance
-                        chunks = fetch_documents_by_resource(
-                            resource_id=res["resource_id"], 
-                            source_type=res["source_type"],
-                            user_id=uid,
-                            username=user_email
-                        )
-                        docs.extend(chunks)
-                        
-                    return docs
-                except Exception as e:
-                    import traceback
-                    traceback.print_exc()
-                    return []
-
-            if backend_mode == "like":
-                kw_results = _fetch_like()
-            elif backend_mode == "fts5":
-                kw_results = _fetch_fts5()
-            else:  # fallback
-                kw_results = _fetch_fts5()
-
-            structured_results = _fetch_structured()
 
             if not kw_results and not structured_results:
                 final_results = vector_results
@@ -339,6 +386,7 @@ async def search_documents(
                 total_hits = len(final_results)
             else:
                 # ----- L3: 融合 -----
+                t0 = time.perf_counter()
                 max_dist = getattr(settings, "HYBRID_VECTOR_MAX_DISTANCE", 0.8)
                 filtered_vector_results = [(d, s) for d, s in vector_results if s < max_dist]
                 k = getattr(settings, "HYBRID_RRF_K", 5)
@@ -392,8 +440,10 @@ async def search_documents(
                 final_results = []
                 for doc_id, score in sorted_docs[:fetch_limit]:
                     final_results.append((doc_map[doc_id], 1.0 / score if score > 0 else float('inf')))
+                timings["fusion_leg"] = (time.perf_counter() - t0) * 1000.0
 
         if getattr(settings, "RERANK_ENABLED", False) and len(final_results) > 0:
+            t0 = time.perf_counter()
             from backend.core.rerank_client import rerank
             try:
                 docs_to_rerank = final_results[:fetch_limit]
@@ -414,8 +464,11 @@ async def search_documents(
             except Exception as e:
                 import logging
                 logging.getLogger(settings.LOGGER_NAME).error(f"Rerank failed: {e}")
+            finally:
+                timings["rerank_leg"] = (time.perf_counter() - t0) * 1000.0
 
         if mmr_enabled and len(final_results) > window_size:
+            t0 = time.perf_counter()
             mode = getattr(settings, "MMR_MODE", "standard")
 
             if mode == "same_resource":
@@ -452,6 +505,7 @@ async def search_documents(
                     final_results = final_results[:window_size]
             else:
                 final_results = final_results[:window_size]
+            timings["mmr_leg"] = (time.perf_counter() - t0) * 1000.0
             
         final_results = await asyncio.to_thread(_expand_context, final_results, window_size)
         _set_query_cache(query_hash, uid, final_results)
@@ -461,6 +515,14 @@ async def search_documents(
         raise
     finally:
         latency_ms = (time.perf_counter() - start_time) * 1000.0
+        timings["total"] = latency_ms
+        if getattr(settings, "SEARCH_TIMING_ENABLED", False):
+            try:
+                import json
+                logger.info(f"search_timings: {json.dumps(timings)}")
+            except Exception as e:
+                pass
+            
         try:
             await asyncio.to_thread(
                 obs_logger.log,

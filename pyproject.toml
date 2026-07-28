@@ -37,9 +37,5 @@ packages = [
     "backend.parsers",
     "backend.vector_store",
     "backend.worker",
-    "frontend",
-    "frontend.streamlit_component",
-    "frontend.streamlit_component.easymde",
-    "frontend.streamlit_component.easymde.frontend",
     "start"
 ]

@@ -64,7 +64,7 @@ Streamlit UI (:8501) --JWT--> FastAPI (:8000)
 | `backend/parsers/` | 可插拔解析器 + registry |
 | `backend/worker/` | durable jobs、URL 处理 |
 | `backend/vector_store/` | 向量引擎适配 |
-| `frontend/` | Streamlit 联调/使用 UI |
+| `web/` | Vue 3 SPA（主前端） |
 | `tests/` | 自动化测试 |
 | `specs/` | 本规范 |
 | `eval/` | （规划）评估集，见升级 plan |

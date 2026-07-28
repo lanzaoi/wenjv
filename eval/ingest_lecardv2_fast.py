@@ -20,6 +20,7 @@ def main():
     parser.add_argument("--n_distractors", type=int, default=50)
     parser.add_argument("--chunk_size", type=int, default=1500)
     parser.add_argument("--chunk_overlap", type=int, default=150)
+    parser.add_argument("--max_chunks", type=int, default=0, help="Stop after N chunks (0=unlimited)")
     args = parser.parse_args()
 
     assert "experiment" in args.lance_dir
@@ -76,6 +77,8 @@ def main():
         text = raw.get("text", "")
         chunks = splitter.split_text(text)
         for ci, ct in enumerate(chunks):
+            if args.max_chunks and len(langchain_docs) >= args.max_chunks:
+                break
             langchain_docs.append(Document(
                 page_content=ct,
                 metadata={

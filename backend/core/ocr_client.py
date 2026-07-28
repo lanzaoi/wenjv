@@ -87,22 +87,90 @@ async def _submit_and_poll(file_tuple: tuple) -> str:
         except Exception as e:
             raise OCRError(f"Failed to download result from {json_url}: {e}")
             
-        # 4. Extract markdown
+        # 4. Extract text from layoutParsingResults (markdown + fallbacks)
         combined_text = []
-        for line in jsonl_text.strip().split('\n'):
+        for line in jsonl_text.strip().split("\n"):
             if not line.strip():
                 continue
             try:
                 item = json.loads(line)
-                results = item.get("layoutParsingResults", [])
-                for res in results:
-                    text = res.get("markdown", {}).get("text", "")
-                    if text:
-                        combined_text.append(text)
+                extracted = _extract_texts_from_ocr_item(item)
+                if extracted:
+                    combined_text.append(extracted)
             except json.JSONDecodeError:
                 continue
-                
+
         return "\n\n".join(combined_text)
+
+
+def _extract_texts_from_ocr_item(item: dict) -> str:
+    """Pull usable text from one OCR JSONL object (multiple response shapes)."""
+    chunks: list[str] = []
+
+    results = item.get("layoutParsingResults") or item.get("result", {}).get(
+        "layoutParsingResults"
+    ) or []
+    if isinstance(results, dict):
+        results = [results]
+
+    for res in results:
+        if not isinstance(res, dict):
+            continue
+        # Preferred: markdown.text
+        md = res.get("markdown") or {}
+        if isinstance(md, dict):
+            t = (md.get("text") or "").strip()
+            if t:
+                chunks.append(t)
+        elif isinstance(md, str) and md.strip():
+            chunks.append(md.strip())
+
+        # prunedResult / overall_ocr_res style
+        for key in ("prunedResult", "pruned_result", "ocrResult", "ocr_result"):
+            pr = res.get(key)
+            if not pr:
+                continue
+            if isinstance(pr, dict):
+                # rec_texts: list of strings
+                rec = pr.get("rec_texts") or pr.get("recTexts") or []
+                if isinstance(rec, list) and rec:
+                    joined = "\n".join(str(x) for x in rec if x)
+                    if joined.strip():
+                        chunks.append(joined.strip())
+                # nested overall_ocr_res
+                ocr = pr.get("overall_ocr_res") or pr.get("overallOcrRes") or {}
+                if isinstance(ocr, dict):
+                    rec2 = ocr.get("rec_texts") or ocr.get("recTexts") or []
+                    if isinstance(rec2, list) and rec2:
+                        joined = "\n".join(str(x) for x in rec2 if x)
+                        if joined.strip():
+                            chunks.append(joined.strip())
+            elif isinstance(pr, str) and pr.strip():
+                chunks.append(pr.strip())
+
+        # plain text field
+        t2 = res.get("text") or res.get("content") or ""
+        if isinstance(t2, str) and t2.strip():
+            chunks.append(t2.strip())
+
+    # Top-level markdown on item
+    if not chunks:
+        md = item.get("markdown") or {}
+        if isinstance(md, dict) and (md.get("text") or "").strip():
+            chunks.append(md["text"].strip())
+        t3 = item.get("text") or ""
+        if isinstance(t3, str) and t3.strip():
+            chunks.append(t3.strip())
+
+    # Deduplicate while preserving order
+    seen = set()
+    unique = []
+    for c in chunks:
+        if c not in seen:
+            seen.add(c)
+            unique.append(c)
+    return "\n\n".join(unique)
+
 
 async def ocr_file(file_path: str) -> str:
     """

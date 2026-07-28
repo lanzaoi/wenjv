@@ -154,8 +154,37 @@ def delete_by_link_id(conn: sqlite3.Connection, link_id: str, belongs_to: str = 
         logger.error(f"Error in delete_by_link_id: {e}")
 
 def _sanitize_fts_query(text: str) -> str:
-    """Clean text for FTS5 MATCH — keep alphanumeric chars and Chinese."""
-    # Remove FTS5 special chars but keep CJK
+    """Clean text for FTS5 MATCH — char-by-char OR for CJK, word AND for ASCII."""
+    # Remove FTS5 special chars but keep CJK and ASCII
     cleaned = re.sub(r'[^\w\u4e00-\u9fff]', ' ', text)
-    # Split and join with implicit AND
-    return ' '.join(t for t in cleaned.split() if len(t) >= 1)
+    words = [t for t in cleaned.split() if len(t) >= 1]
+
+    if not words:
+        return ""
+
+    cjk_parts = []
+    ascii_parts = []
+
+    for word in words:
+        if re.search(r'[\u4e00-\u9fff]', word):
+            # Chinese: build 2- and 3-character sliding windows from CJK chars
+            cjk_chars = re.findall(r'[\u4e00-\u9fff]', word)
+            # n-grams of lengths 2 and 3
+            for n in (3, 2):
+                for i in range(len(cjk_chars) - n + 1):
+                    cjk_parts.append(''.join(cjk_chars[i:i+n]))
+            # Also include each single ASCII+number chunk
+            chars = re.findall(r'[A-Za-z0-9]+', word)
+            cjk_parts.extend(chars)
+        else:
+            ascii_parts.append(f'"{word}"')
+
+    result_parts = []
+    if cjk_parts:
+        # Deduplicate CJK n-grams
+        unique_grams = list(dict.fromkeys(cjk_parts))
+        result_parts.append('(' + ' OR '.join(f'"{c}"' for c in unique_grams[:50]) + ')')  # cap at 50 terms
+    if ascii_parts:
+        result_parts.append('(' + ' AND '.join(ascii_parts) + ')')
+
+    return ' AND '.join(result_parts) if result_parts else ""

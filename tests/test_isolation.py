@@ -9,7 +9,9 @@ from sqlalchemy.orm import sessionmaker
 from backend.main import app
 from backend.api.dependencies import current_active_user
 from backend.database import get_async_session, Base
-from backend.api.models import User, Note, IngestionJob, JobStatus, ProcessingStatus
+from backend.api.models import (
+    User, Note, IngestionJob, JobStatus, ProcessingStatus, FileUpload, Link,
+)
 from langchain.schema import Document
 from backend.config import settings
 
@@ -73,8 +75,29 @@ def setup_isolation_env(tmp_path):
                 user_email="10000@qq.com",
                 status=JobStatus.PENDING
             )
+            file_a = FileUpload(
+                id=20,
+                filename="secret_a.txt",
+                original_filename="secret_a.txt",
+                file_path=str(tmp_path / "secret_a.txt"),
+                file_url="http://local/secret_a.txt",
+                status=ProcessingStatus.FINISHED,
+                content_type="text/plain",
+                user_id=1,
+            )
+            (tmp_path / "secret_a.txt").write_text("file secret A", encoding="utf-8")
+            link_a = Link(
+                id=30,
+                url="https://example.com/a-only",
+                title="Link A private",
+                favicon="",
+                status=ProcessingStatus.FINISHED,
+                user_id=1,
+            )
             session.add(note_a)
             session.add(job_a)
+            session.add(file_a)
+            session.add(link_a)
             await session.commit()
 
     asyncio.run(seed_data())
@@ -164,3 +187,27 @@ def test_api_isolation_matrix():
     # 8. DELETE /file/note/{filename}: B deleting A's note -> 404 or 403
     res8 = client.delete("/file/note/note_a.md", headers=headers_b)
     assert res8.status_code in [403, 404]
+
+    # 9. GET /file/ listing: B must not see A's file
+    res9_b = client.get("/file/", headers=headers_b)
+    assert res9_b.status_code == 200
+    files_b = res9_b.json().get("files") or []
+    names_b = [f.get("filename") for f in files_b]
+    assert "secret_a.txt" not in names_b
+    res9_a = client.get("/file/", headers=headers_a)
+    assert res9_a.status_code == 200
+    files_a = res9_a.json().get("files") or []
+    names_a = [f.get("filename") for f in files_a]
+    assert "secret_a.txt" in names_a
+
+    # 10. GET /links/: B must not see A's link
+    res10_b = client.get("/links/", headers=headers_b)
+    assert res10_b.status_code == 200
+    links_b = res10_b.json().get("links") or []
+    urls_b = [x.get("url") for x in links_b]
+    assert "https://example.com/a-only" not in urls_b
+    res10_a = client.get("/links/", headers=headers_a)
+    assert res10_a.status_code == 200
+    links_a = res10_a.json().get("links") or []
+    urls_a = [x.get("url") for x in links_a]
+    assert "https://example.com/a-only" in urls_a

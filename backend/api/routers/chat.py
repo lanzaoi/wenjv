@@ -1,7 +1,7 @@
 import json
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, UploadFile, File, Form, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -54,6 +54,60 @@ async def chat_rag(
             exclude_sources=body.exclude_sources,
             history=history,
             use_rag=body.use_rag,
+        ):
+            yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(
+        event_gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@chat_router.post("/by-image")
+async def chat_by_image(
+    file: UploadFile = File(...),
+    model: Optional[str] = Form(None),
+    window_size: Optional[int] = Form(5),
+    source_type: Optional[str] = Form(None),
+    include_sources: Optional[str] = Form(None),
+    exclude_sources: Optional[str] = Form(None),
+    use_rag: bool = Form(True),
+    user: User = Depends(current_active_user),
+):
+    from backend.core.image_ingest import extract_text_from_image_bytes, ImageExtractionError
+    from backend.core.image_query_gate import validate_image_query_upload
+
+    ok, reason = validate_image_query_upload(file.filename)
+    if not ok:
+        raise HTTPException(status_code=400, detail=reason)
+
+    try:
+        content = await file.read()
+        question = await extract_text_from_image_bytes(content, filename=file.filename)
+    except ImageExtractionError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail="Internal server error extracting image")
+
+    inc_list = [x.strip() for x in include_sources.split(",")] if include_sources else None
+    exc_list = [x.strip() for x in exclude_sources.split(",")] if exclude_sources else None
+
+    async def event_gen():
+        async for event in chat_service.rag_chat_events(
+            question=question,
+            user_email=user.email,
+            user_id=user.id,
+            model=model,
+            window_size=window_size or 5,
+            source_type=source_type,
+            include_sources=inc_list,
+            exclude_sources=exc_list,
+            history=None,
+            use_rag=use_rag,
         ):
             yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
 

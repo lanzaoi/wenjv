@@ -49,6 +49,17 @@ async def upload_file(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"File type not allowed. Allowed extensions: {allowed}",
         )
+        
+    image_exts = {".png", ".jpg", ".jpeg"}
+    lower_name = original_name.lower()
+    if any(lower_name.endswith(e) for e in image_exts):
+        from backend.core.image_ingest_gate import image_ingest_allowed
+        allowed, reason = image_ingest_allowed(settings)
+        if not allowed:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Image upload disabled or no extraction backend available: {reason}",
+            )
 
     # Read with size cap (UploadFile may be spooled)
     max_bytes = settings.MAX_UPLOAD_BYTES

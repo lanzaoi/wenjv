@@ -85,6 +85,9 @@ def ensure_vector_ann_index(table=None, min_rows: int = 256) -> bool:
     """
     Best-effort ANN index creation (IVF/HNSW depending on Lance version).
     Small tables stay on flat scan — index build is deferred until min_rows.
+
+    NOTE: Never call create_index(\"vector\") — Lance treats the first positional
+    arg as *metric*, so metric='vector' raises Invalid distance type.
     """
     try:
         table = table or db.open_table(TABLE_NAME)
@@ -96,21 +99,30 @@ def ensure_vector_ann_index(table=None, min_rows: int = 256) -> bool:
             logger.debug(f"skip vector index: only {n} rows (<{min_rows})")
             return False
 
-        # Try a few common Lance APIs across versions
+        # Prefer simpler indexes first — IVF_PQ panics/unwraps on zero vectors
+        # or degenerate data; cosine metric is required (not positional "vector").
+        dim = int(getattr(settings, "EMBEDDINGS_DIMENSION", 1024) or 1024)
+        nparts = min(256, max(2, n // 40))
+        # num_sub_vectors must divide dimension for PQ
+        nsub = 16 if dim % 16 == 0 else (8 if dim % 8 == 0 else 4)
+
         errors = []
         attempts = [
+            # 1) IVF_FLAT / default cosine on named column (safest)
+            lambda: table.create_index(
+                metric="cosine",
+                vector_column_name="vector",
+            ),
+            # 2) Explicit IVF_PQ with safe sub-vector count
             lambda: table.create_index(
                 metric="cosine",
                 vector_column_name="vector",
                 index_type="IVF_PQ",
-                num_partitions=min(256, max(2, n // 40)),
-                num_sub_vectors=min(96, max(8, settings.EMBEDDINGS_DIMENSION // 4)),
+                num_partitions=nparts,
+                num_sub_vectors=nsub,
             ),
-            lambda: table.create_index(
-                metric="cosine",
-                vector_column_name="vector",
-            ),
-            lambda: table.create_index("vector"),
+            # 3) Older Lance: keyword-only metric, no vector_column_name
+            lambda: table.create_index(metric="cosine"),
         ]
         for fn in attempts:
             try:
@@ -119,7 +131,10 @@ def ensure_vector_ann_index(table=None, min_rows: int = 256) -> bool:
                 return True
             except Exception as e:
                 errors.append(str(e))
-        logger.warning(f"vector index not created: {errors[-1] if errors else 'unknown'}")
+        # Flat scan is fine — do not raise
+        logger.warning(
+            f"vector index not created (flat scan OK): {errors[-1] if errors else 'unknown'}"
+        )
         return False
     except Exception as e:
         logger.warning(f"ensure_vector_ann_index failed: {e}")

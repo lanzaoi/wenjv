@@ -79,8 +79,14 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def extend_upload_extensions(self) -> "Settings":
-        if self.OCR_MODE != "off":
+        from backend.core.image_ingest_gate import image_ingest_allowed
+        allowed, _ = image_ingest_allowed(self)
+        if allowed:
             for ext in ["png", "jpg", "jpeg"]:
+                if ext not in self.ALLOWED_UPLOAD_EXTENSIONS:
+                    self.ALLOWED_UPLOAD_EXTENSIONS.append(ext)
+        if getattr(self, "AUDIO_ASR_ENABLED", False):
+            for ext in ["mp3", "m4a", "wav", "mpeg", "mpga", "webm"]:
                 if ext not in self.ALLOWED_UPLOAD_EXTENSIONS:
                     self.ALLOWED_UPLOAD_EXTENSIONS.append(ext)
         return self
@@ -122,7 +128,7 @@ class Settings(BaseSettings):
     HYBRID_KEYWORD_BACKEND: str = "fts5"  # fts5 | like
     HYBRID_VECTOR_MAX_DISTANCE: float = 0.8
     HYBRID_RRF_K: int = 5
-    HYBRID_RRF_WEIGHT_VECTOR: float = 1.0
+    HYBRID_RRF_WEIGHT_VECTOR: float = 3.0
     HYBRID_RRF_WEIGHT_KEYWORD: float = 1.0
 
     # ---- 1.2 RAG Depth ----
@@ -136,8 +142,8 @@ class Settings(BaseSettings):
     RERANK_CANDIDATES: int = 20
     RERANK_TIMEOUT_SECONDS: int = 8
 
-    # MMR
-    MMR_ENABLED: bool = True
+    # MMR — gate 1.4/1.5: default OFF (λ=0.7 optional when enabled)
+    MMR_ENABLED: bool = False
     MMR_LAMBDA: float = 0.7
     MMR_MODE: str = "standard"  # "standard" | "same_resource"
 
@@ -145,6 +151,7 @@ class Settings(BaseSettings):
     STRUCTURED_RECALL_ENABLED: bool = True
     HYBRID_RRF_WEIGHT_STRUCTURED: float = 1.0
     STRUCTURED_RECALL_LIMIT: int = 20
+    STRUCTURED_RECALL_MAX_QUERY_LENGTH: int = 200
 
     # Caching Layer (1.4)
     EMBEDDING_CACHE_ENABLED: bool = True
@@ -171,6 +178,11 @@ class Settings(BaseSettings):
     QUERY_CLASSIFIER_LONG_QUESTION_BOOST: float = 2.0
     QUERY_CLASSIFIER_MAX_WEIGHT: float = 5.0
 
+    # Search Acceleration (1.5)
+    SEARCH_TIMING_ENABLED: bool = False
+    SEARCH_PARALLEL_LEGS: bool = True
+    SEARCH_FETCH_MULTIPLIER: int = 1
+
     # OCR (AI Studio v2 async)
     OCR_MODE: str = "off"
     OCR_PROVIDER: str = "aistudio"
@@ -194,8 +206,24 @@ class Settings(BaseSettings):
 
     # Multimodal (1.5)
     MULTIMODAL_ENABLED: bool = False
-    GEMINI_API_KEY: str = os.environ.get("GOOGLE_API_KEY", "")
+    # Prefer GEMINI_API_KEY; also accept GOOGLE_API_KEY from env/.env
+    GEMINI_API_KEY: str = ""
     GEMINI_VL_MODEL: str = "gemini-2.0-flash"
+
+    # Image Ingestion (1.7)
+    IMAGE_INGEST_ENABLED: bool = True
+    IMAGE_CAPTION_FALLBACK_ENABLED: bool = True
+
+    # PPTX image-heavy OCR (1.6) — also runs when MULTIMODAL_ENABLED
+    PPTX_OCR_EMPTY_SLIDES: bool = False
+
+    # Audio ASR via SiliconFlow SenseVoice (1.6) — default OFF
+    AUDIO_ASR_ENABLED: bool = False
+    ASR_API_BASE: str = "https://api.siliconflow.cn/v1"
+    ASR_API_KEY: str = ""  # falls back to EMBEDDING_API_KEY
+    ASR_MODEL: str = "FunAudioLLM/SenseVoiceSmall"
+    ASR_TIMEOUT_SECONDS: int = 120
+    ASR_MAX_UPLOAD_BYTES: int = 50 * 1024 * 1024  # SF ~50MB / 1h
 
     # Late Chunking (1.5)
     LATE_CHUNKING_ENABLED: bool = False
@@ -213,9 +241,11 @@ class Settings(BaseSettings):
     JWT_EXPIRATION_MINUTES: int = 60 * 24  # 1 day (override in backend.env if needed)
     JWT_TOKEN_AUDIENCE: str = "fastapi-users:auth"
 
-    # CORS settings
-    # Streamlit UI default port
-    CORS_ORIGINS: list[str] = ["http://localhost:8501"]
+    # CORS settings — Vue dev (5173)
+    CORS_ORIGINS: list[str] = [
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ]
     WINDOW_SIZE_MULTIPLIER: int = 10
     DEFAULT_HEADERS: Dict[str, str] = {
         "User-Agent": "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:136.0) Gecko/20100101 Firefox/136.0",
@@ -262,6 +292,18 @@ class Settings(BaseSettings):
             except json.JSONDecodeError:
                 return [item.strip().lstrip('.') for item in v.split(',') if item.strip()]
         return v
+
+    @field_validator("GEMINI_API_KEY", mode="before")
+    @classmethod
+    def resolve_gemini_key(cls, v):
+        """Accept GEMINI_API_KEY or fall back to GOOGLE_API_KEY from env."""
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+        return (
+            os.environ.get("GEMINI_API_KEY")
+            or os.environ.get("GOOGLE_API_KEY")
+            or ""
+        )
 
 
 settings = Settings()

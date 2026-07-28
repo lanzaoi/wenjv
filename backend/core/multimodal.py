@@ -48,10 +48,21 @@ async def generate_caption(image_bytes: bytes, model: str = "gemini-2.0-flash") 
 
 
 async def _ocr_for_caption(image_bytes: bytes, settings) -> str:
-    """Run PaddleOCR on image, return extracted text."""
+    """Run PaddleOCR on image, return extracted text.
+
+    Multimodal captions force OCR even when OCR_MODE=off (document ingest
+    may keep OCR off while still wanting image captions when MULTIMODAL is on).
+    """
     try:
         from backend.core.ocr_client import ocr_image_bytes
-        return (await ocr_image_bytes(image_bytes)).strip()
+
+        prev = getattr(settings, "OCR_MODE", "off")
+        if prev == "off" and getattr(settings, "MULTIMODAL_ENABLED", False):
+            settings.OCR_MODE = "always"
+        try:
+            return (await ocr_image_bytes(image_bytes)).strip()
+        finally:
+            settings.OCR_MODE = prev
     except Exception as e:
         logger.warning(f"OCR caption failed, will try Gemini: {e}")
         return ""

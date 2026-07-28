@@ -2,6 +2,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import or_
 from backend.database import sync_engine
 from backend.api.models import Note, FileUpload, Link
+from backend.config import settings
 
 def search_resources(prompt: str, user_id: int, limit: int = 20) -> list[dict]:
     """
@@ -12,7 +13,11 @@ def search_resources(prompt: str, user_id: int, limit: int = 20) -> list[dict]:
         return []
         
     results = []
-    search_term = f"%{prompt}%"
+    # Truncate prompt to prevent SQLite "LIKE pattern too complex" for long queries
+    search_str = str(prompt).strip()
+    max_search = getattr(settings, "STRUCTURED_RECALL_MAX_QUERY_LENGTH", 200)
+    search_str = search_str[:max_search]
+    search_term = f"%{search_str}%"
     
     try:
         with Session(sync_engine) as session:
@@ -59,7 +64,6 @@ def search_resources(prompt: str, user_id: int, limit: int = 20) -> list[dict]:
                 })
     except Exception as e:
         import logging
-        from backend.config import settings
         logging.getLogger(settings.LOGGER_NAME).error(f"Structured recall SQL error: {e}")
         
     # Optional: we can sort by some criteria or just return the list

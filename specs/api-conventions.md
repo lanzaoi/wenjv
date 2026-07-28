@@ -89,5 +89,5 @@ data: {"type":"error","message":"..."}
 
 ## 9. 前端调用
 
-- `frontend/utils.py` 为 API 客户端集中处；新增接口优先写这里。  
+- `web/src/api/client.js` 为 API 客户端集中处；新增接口优先写这里。  
 - 禁止在多个组件复制两套 base URL 与 header 逻辑。

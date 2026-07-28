@@ -26,3 +26,6 @@ eval/msmarco_data/
 .pytest_cache/
 eval/sample_1000.json
 eval/msmarco_data/
+web/node_modules/
+web/dist/
+start/kb_runtime.env

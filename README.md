@@ -3,8 +3,8 @@
 自托管的个人知识库系统：管理 **笔记 / 文件 / 网页链接**，异步向量化入库，并提供 **带引用的检索与流式问答**。
 
 - **后端**：FastAPI + SQLAlchemy + JWT  
-- **前端**：Streamlit（联调 UI）  
-- **关系库**：SQLite（默认可换）  
+- **前端**：Vue 3 + Vite（`web/`，Apple light UI）  
+- **关系库**：SQLite（默认可换）
 - **向量库**：LanceDB（默认；可选 Chroma / Milvus Lite）  
 - **模型**：本地 [Ollama](https://github.com/ollama/ollama)（Embedding + 对话）
 
@@ -19,14 +19,15 @@
 | 类型 | 能力 |
 |------|------|
 | **笔记** | Markdown 创建 / 编辑 / 列表 / 删除；改后自动刷新向量 |
-| **文件** | 上传、状态轮询、下载；支持 txt / md / pdf / docx / pptx / csv / json 等（可配置） |
+| **文件** | 上传、状态轮询、下载；支持 txt / md / pdf / docx / pptx / csv / json / **png / jpg / jpeg** 等（可配置） |
+| **图片** | (v1.7) 独立图片入库：OCR → 空则 Gemini 描述 → 仍空失败；查询侧 **T0 图问**（图→文→Hybrid，非向量以图搜图）：`POST /documents/search/by-image`（兼容 `/documents/search-by-image`）、`POST /chat/by-image`。 |
 | **链接** | 单条 / 批量提交；抓取正文后入库；可选实验性递归抓取 |
 
-### 工程能力 (v1.3 强固与标准化)
+### 工程能力 (v1.3~v1.7 强固与演进)
 
 - **严密的多租户安全隔离**：基于 **JWT 鉴权** 与 `user_id` / `belongs_to` 硬过滤，通过矩阵测试用例验证从 API 接口到底层向量检索的100%跨租户隔离防御。  
-- **异步任务队列与失败重试**（`ingestion_jobs`）：支持状态转换（pending → running → succeeded/failed）、超时自动回收及新增的 `POST /jobs/{id}/retry` 失败或撤销任务重试端点。  
-- **高精准检索与重排管线**：支持基于向量与 SQLite FTS5 词法补充的混合检索 (Hybrid Search)、等权 RRF 融合计算及 MMR 边际多样性去重过滤。  
+- **异步任务队列与图片抽取**（`ingestion_jobs`）：支持状态转换及容错，包括对 PNG/JPG 图片采用后台 durable worker 异步调用抽取字描述入库。
+- **高精准检索与加速**：支持基于向量与 SQLite FTS5 词法的混合检索 (Hybrid Search)。v1.7 新增**检索分腿并行加速** (`SEARCH_PARALLEL_LEGS`) 缩短 I/O 等待，附带完整测试套件覆盖单腿 Fail-open 防御机制。  
 - **量化评估与配置门禁**：内置基于 MS MARCO 数据集的标准化检索评分评估系统 (`eval/`) 与 4 组矩阵测试跑批，以数据门禁文档（`gate_decision.md`）指导默认配置。  
 - **生产级 Docker Compose 部署**：支持 `docker-compose up` 一键拉起，采用非 root 专用账户 (`appuser`) 安全运行、零凭据外泄配置，并与本机直接运行共享统一持久化数据。  
 - **嵌入式向量存储引擎**：默认采用单文件高性能 LanceDB 引擎（选型论证详见 [ADR 0001](./specs/adr/0001-lance-vs-pgvector.md)；我们恪守诚实原则，在个人自用与小团队规模下不宣称且不滥用服务器端 pgvector）。  
@@ -46,15 +47,15 @@
 ## 架构概览
 
 ```text
-Streamlit UI (:8501)
-        │  Bearer JWT
+Vue SPA (:5173)  — web/
+        │  Bearer JWT  (/api proxy → backend)
         ▼
 FastAPI (:8000)
   ├── routers: auth / file / links / documents / jobs / chat
   ├── services: ingestion / search / chat
   ├── SQLite  ← 用户、资源元数据、任务表
   ├── durable worker → parsers → embeddings → Vector DB
-  └── /chat SSE → 检索 + Ollama 流式生成
+  └── /chat SSE → 检索 + 云端/Ollama 流式生成
 ```
 
 **双存储分工**
@@ -130,7 +131,7 @@ inquisitive-start-backend
 inquisitive-start-ui
 ```
 
-- 前端：<http://localhost:8501>  
+- 前端：<http://localhost:5173>  
 - 后端：<http://localhost:8000>  
 - API 文档：<http://localhost:8000/redoc>  
 - 健康检查：<http://localhost:8000/ping>
@@ -142,9 +143,9 @@ inquisitive-start-ui
 uvicorn backend.main:app --reload --port 8000 --log-level debug
 
 # 终端 2
-set STREAMLIT_BROWSER_GATHER_USAGE_STATS=false   # Windows cmd
-# export STREAMLIT_BROWSER_GATHER_USAGE_STATS=false  # bash
-streamlit run frontend/app.py
+cd web
+set VITE_PROXY_TARGET=http://127.0.0.1:8000
+npm run dev
 ```
 
 ### 4. 一键启动（实验）
@@ -218,9 +219,9 @@ SECRET_KEY=请换成足够长的随机串
 | `DEFAULT_VECTOR_DB` | 向量后端（默认 Lance） |
 | `ALLOWED_UPLOAD_EXTENSIONS` | 允许上传的扩展名 |
 | `MAX_UPLOAD_BYTES` | 单文件大小上限 |
-| 前端 `API_URL` | Streamlit 访问后端的地址 |
+| 前端 `API_URL` / Vite `VITE_PROXY_TARGET` | 开发时代理到后端的地址 |
 
-默认值见 `backend/config.py`、`frontend/config.py`。  
+默认值见 `backend/config.py`。Vue 前端见 `web/README.md`。  
 若通过环境变量改了数据目录路径，请自行创建对应子目录。
 
 ---
@@ -234,10 +235,12 @@ SECRET_KEY=请换成足够长的随机串
 | * | `/file/note...` | 笔记 CRUD / sync |
 | GET | `/file/status/{filename}` | 处理状态（含错误信息） |
 | * | `/links/*` | 链接提交、批量、列表、删除、crawl |
-| POST | `/documents/search` | 向量检索 |
+| POST | `/documents/search` | 向量/混合检索 |
+| POST | `/documents/search/by-image` | T0 图问检索 |
 | GET | `/jobs`、`/jobs/{id}` | 入库任务 |
 | POST | `/chat` | RAG 流式对话（SSE） |
-| GET | `/chat/models` | 列出 Ollama 模型 |
+| POST | `/chat/by-image` | T0 图问对话（SSE） |
+| GET | `/chat/models` | 列出可用对话模型 |
 | GET | `/ping` | 健康检查 |
 
 完整契约以运行中的 **Redoc** 为准。
@@ -270,7 +273,7 @@ data: {"type":"done"}
 │   ├── vector_store/        # Lance / Chroma / Milvus
 │   ├── worker/              # 持久任务与链接处理
 │   └── core/
-├── frontend/                # Streamlit UI
+├── web/                     # Vue 3 SPA（主前端）
 ├── tests/                   # 结构冒烟测试
 ├── start/                   # CLI 启动器
 ├── UPGRADE_ROADMAP.md
@@ -291,7 +294,7 @@ pytest tests/test_smoke_architecture.py -q
 
 ## 部署提示
 
-- **本机自用**：保证 8000 / 8501 空闲即可。  
+- **本机自用**：保证 8000 / 5173 空闲即可。  
 - **局域网 / 公网**：务必配置 HTTPS、修改 `SECRET_KEY`、收紧 CORS，并建议在反向代理（如 Nginx）后暴露。  
 - **删除资源**：默认从数据库与向量库移除记录；磁盘上的原始文件可能仍保留在 `uploads/`，请按需自行清理或后续扩展硬删策略。  
 - **备份**：定期备份 `~/.config/inquisitive/` 整个目录。

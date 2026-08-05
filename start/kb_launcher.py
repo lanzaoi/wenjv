@@ -33,8 +33,51 @@ def pick_port(host: str, start: int, count: int = 30) -> int:
     )
 
 
+def get_config_dir() -> Path:
+    """Same resolution rules as backend.core.paths.resolve_base_dir."""
+    try:
+        from backend.core.paths import resolve_base_dir
+
+        return Path(resolve_base_dir())
+    except Exception:
+        # Extremely defensive: mirror A+ rules with stdlib only
+        base = Path(os.path.expanduser("~")) / ".config"
+        primary = base / "wenjv"
+        fallback = base / "inquisitive"
+
+        def _has(p: Path) -> bool:
+            if not p.is_dir():
+                return False
+            for name in (
+                "wenjv.db",
+                "inquisitive.db",
+                "backend.env",
+                "frontend.env",
+                "cache.db",
+                "lance_db",
+                "uploads",
+            ):
+                c = p / name
+                if c.is_file() and c.stat().st_size > 0:
+                    return True
+                if c.is_dir():
+                    try:
+                        next(c.iterdir())
+                        return True
+                    except StopIteration:
+                        pass
+            return False
+
+        if _has(primary):
+            return primary
+        if _has(fallback):
+            return fallback
+        return primary
+
+
 def write_frontend_api_url(api_url: str) -> Path:
-    home = Path(os.path.expanduser("~")) / ".config" / "inquisitive"
+    home = get_config_dir()
+    # mkdir only after resolve — never create empty wenjv while legacy has data
     home.mkdir(parents=True, exist_ok=True)
     path = home / "frontend.env"
     lines: list[str] = []

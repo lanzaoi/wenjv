@@ -33,7 +33,7 @@ HTTP Routers (backend/api/routers/*, auth in router.py)
 
 | 存储 | 职责 | 默认实现 |
 |------|------|----------|
-| 关系库 | 用户、资源元数据、任务、状态 | SQLite（`~/.config/inquisitive/`） |
+| 关系库 | 用户、资源元数据、任务、状态 | SQLite（默认目录 `~/.config/wenjv/`，自动回退 `~/.config/inquisitive/`；默认数据库 `wenjv.db`，自动回退 `inquisitive.db`） |
 | 向量库 | chunk 向量与检索 meta | LanceDB（可切换 Chroma/Milvus Lite） |
 
 原则：
@@ -53,7 +53,21 @@ Streamlit UI (:8501) --JWT--> FastAPI (:8000)
 ```
 
 - 入口：`backend/main.py`（`lifespan`，禁止回到全局 `on_event` 启动关键逻辑）。  
-- CLI：`inquisitive-start-backend` / `inquisitive-start-ui`（包名兼容，产品名「个人知识库」）。
+- CLI：`wenjv-start-backend` / `wenjv-start-ui` / `wenjv-start` / `wenjv`（产品 formal name 为「wenjv / 问据」；原生支持兼容旧命令 `inquisitive-start*`）。
+
+## 4.1 向后兼容机制 (R2 Backward Compatibility)
+
+系统完整支持以下向下兼容与自动降级机制：
+
+1. **CLI 命令兼容**：
+   - 主推荐命令：`wenjv`, `wenjv-start`, `wenjv-start-backend`, `wenjv-start-ui`
+   - 历史兼容命令：`inquisitive`, `inquisitive-start`, `inquisitive-start-backend`, `inquisitive-start-ui` 均保持完整支持。
+2. **磁盘配置路径回退**：
+   - 配置与存储根目录优先使用 `~/.config/wenjv`。
+   - 若 `~/.config/wenjv` 不存在且存在历史 `~/.config/inquisitive` 目录，系统自动回退使用 `~/.config/inquisitive`。
+3. **数据库文件名回退**：
+   - SQLite 数据库文件名优先使用 `wenjv.db`。
+   - 若基础目录下 `wenjv.db` 不存在且存在历史 `inquisitive.db` 文件，系统自动回退挂载 `inquisitive.db`。
 
 ## 5. 目录约定
 

@@ -32,7 +32,7 @@ async def lifespan(app: FastAPI):
     if is_insecure_default_secret():
         get_logger().warning(
             "Insecure default SECRET_KEY detected. "
-            "Set SECRET_KEY in ~/.config/inquisitive/backend.env before any real deployment."
+            "Set SECRET_KEY in ~/.config/wenjv/backend.env (or ~/.config/inquisitive/backend.env) before any real deployment."
         )
     create_db_and_tables()
     await start_job_workers()
@@ -41,7 +41,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="个人知识库 API", lifespan=lifespan)
+app = FastAPI(title="wenjv API", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -62,7 +62,7 @@ app.include_router(admin_router, prefix="/admin")
 
 @app.get("/")
 async def root():
-    return {"message": "个人知识库 API 运行中"}
+    return {"message": "wenjv API 运行中"}
 
 
 @app.get("/ping")

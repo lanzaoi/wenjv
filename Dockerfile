@@ -1,4 +1,4 @@
-# Dockerfile for Inquisitive Backend (Draft)
+# Dockerfile for wenjv Backend (Draft)
 FROM python:3.11-slim
 
 WORKDIR /app
@@ -15,7 +15,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Create non-root user for production security best practices
 RUN useradd -m -u 1000 appuser && \
-    mkdir -p /home/appuser/.config/inquisitive && \
+    mkdir -p /home/appuser/.config/wenjv && \
     chown -R appuser:appuser /app /home/appuser
 
 USER appuser

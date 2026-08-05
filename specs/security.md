@@ -5,7 +5,7 @@
 - `SECRET_KEY` 必须在部署/共享环境自定义；禁止提交真实密钥到 git。
 - **第三方 API 密钥（如 OpenAI 兼容服务）**：必须仅保存在本机环境中，严禁硬编码或提交至代码库。  
 - 默认占位密钥：启动应告警（已有逻辑需保持）。  
-- 配置文件：`~/.config/inquisitive/backend.env`、`frontend.env`。
+- 配置文件：`~/.config/wenjv/backend.env`（自动回退 `~/.config/inquisitive/backend.env`）、`frontend.env`。
 
 ## 2. 认证与授权
 

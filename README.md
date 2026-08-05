@@ -1,7 +1,15 @@
-# 个人知识库（CRUD + RAG）
+# wenjv（问据）
 
-自托管的个人知识库系统：管理 **笔记 / 文件 / 网页链接**，异步向量化入库，并提供 **带引用的检索与流式问答**。
+wenjv（问据）自托管知识库：**笔记 / 文件 / 网页链接** 管理，异步向量化入库，**Hybrid 检索 + 带引用的流式问答**。
 
+> 产品名 **wenjv**（问据：有问有据）。
+>
+> **向下兼容（数据优先，空目录不抢库）**：
+> - **CLI**：主推 `wenjv-start` / `wenjv-start-backend` / `wenjv-start-ui` / `wenjv`；历史 `inquisitive-start*` / `inquisitive` 仍可用。
+> - **配置目录**：优先 `~/.config/wenjv/`（须含真实数据标记：非空 db / backend.env / 非空 lance_db|uploads 等）。若 wenjv **不存在或只是空壳**，而 `~/.config/inquisitive/` 有数据 → **自动回退旧目录**（避免误 `mkdir` 空 wenjv 丢库）。
+> - **数据库文件**：同目录下优先非空 `wenjv.db`，否则非空 `inquisitive.db`，全新安装默认 `wenjv.db`。
+> - **Docker Compose**：默认挂载 host `~/.config/wenjv`。旧数据仍在 inquisitive 时设置 `WENJV_CONFIG_DIR` 指向该目录，或先迁移。
+> - 解析实现：`backend/core/paths.py`（与 `start/kb_launcher.py` / `start-kb.bat` 共用规则）。
 - **后端**：FastAPI + SQLAlchemy + JWT  
 - **前端**：Vue 3 + Vite（`web/`，Apple light UI）  
 - **关系库**：SQLite（默认可换）
@@ -124,11 +132,11 @@ pip install -e .
 两个终端，均先激活同一 venv，并在项目根目录执行：
 
 ```bash
-# 终端 1 — API
-inquisitive-start-backend
+# 终端 1 — API (也可使用兼容命令 inquisitive-start-backend)
+wenjv-start-backend
 
-# 终端 2 — UI
-inquisitive-start-ui
+# 终端 2 — UI (也可使用兼容命令 inquisitive-start-ui)
+wenjv-start-ui
 ```
 
 - 前端：<http://localhost:5173>  
@@ -151,7 +159,8 @@ npm run dev
 ### 4. 一键启动（实验）
 
 ```bash
-inquisitive-start
+wenjv-start
+# 或兼容命令 inquisitive-start
 ```
 
 首次拉起后端可能稍慢，请等待完成。
@@ -162,10 +171,10 @@ inquisitive-start
 
 #### 前置条件
 1. **容器引擎**：Linux / macOS 系统直接支持；Windows 系统请确保已安装并启动 **Docker Desktop**，并开启 **WSL2 引擎** (Windows Subsystem for Linux 2) 支持。
-2. **外部配置文件与数据目录**：启动前，请务必确认宿主机上已创建 `~/.config/inquisitive/`（Windows 下为 `%USERPROFILE%\.config\inquisitive\`）目录，并将配置放置于该目录下的 `backend.env` 文件中。
+2. **外部配置文件与数据目录**：启动前，请务必确认宿主机上已创建 `~/.config/wenjv/`（或历史兼容目录 `~/.config/inquisitive/`，Windows 下为 `%USERPROFILE%\.config\wenjv\`），并将配置放置于该目录下的 `backend.env` 文件中。
 
 > [!IMPORTANT]
-> 零外泄安全铁律：为遵循安全最佳实践，**严禁**在 Git 仓库的 `Dockerfile` 或 `docker-compose.yml` 中硬编码 `SECRET_KEY` 或 API 密钥。所有敏感配置均需通过宿主机上的 `~/.config/inquisitive/backend.env` 外部注入。
+> 零外泄安全铁律：为遵循安全最佳实践，**严禁**在 Git 仓库的 `Dockerfile` 或 `docker-compose.yml` 中硬编码 `SECRET_KEY` 或 API 密钥。所有敏感配置均需通过宿主机上的外部配置文件注入。
 
 #### 启动命令
 在项目根目录下开启终端执行：
@@ -175,21 +184,21 @@ docker-compose up -d --build
 容器启动后，后端 API 服务将挂载于 `<http://localhost:8000>`，OpenAPI 交互式接口文档见 `<http://localhost:8000/redoc>`。
 
 #### 数据持久化与多模式互通说明
-- **目录挂载关系**：在 `docker-compose.yml` 中，宿主机的 `~/.config/inquisitive` 目录通过 bind mount 映射至容器内部非 root 用户（`appuser`）的主目录 `/home/appuser/.config/inquisitive`。
-- **与本机脚本 (bat/sh) 互通**：使用 `docker-compose` 与使用本机直接运行脚本（如 `start-kb.bat` 或 `inquisitive-start`）**共享完全相同的宿主机数据目录**。因此，无论通过容器还是原生脚本启动，SQLite 数据库 (`inquisitive.db`) 与 LanceDB 向量库 (`lance_db/`) 均可无缝互通与持久化保存。
+- **目录挂载关系**：在 `docker-compose.yml` 中，宿主机的配置目录（`~/.config/wenjv` 或兼容 `~/.config/inquisitive`）通过 bind mount 映射至容器内部非 root 用户（`appuser`）的主目录。
+- **与本机脚本 (bat/sh) 互通**：使用 `docker-compose` 与使用本机直接运行脚本（如 `start-kb.bat`、`wenjv-start` 或 `inquisitive-start`）**共享完全相同的宿主机数据目录**。因此，无论通过容器还是原生脚本启动，SQLite 数据库 (`wenjv.db` 或兼容 `inquisitive.db`) 与 LanceDB 向量库 (`lance_db/`) 均可无缝互通与持久化保存。
 - **⚠️ 读写并发警告**：由于 SQLite 与 LanceDB 属于嵌入式存储引擎，不支持跨独立的 OS 运行环境进行多进程并发写。严禁**同时**运行后台 Docker 容器与本机终端（如双击 `start-kb.bat`）对同一份数据进行操作，否则会导致数据库死锁 (`database is locked`) 甚至文件锁冲突损坏。
 
 ---
 
 ## 配置说明
 
-首次启动后，数据与配置默认落在：
+首次启动后，数据与配置默认落在 `~/.config/wenjv/`（若存在历史配置则自动兼容回退至 `~/.config/inquisitive/`）：
 
 ```text
-~/.config/inquisitive/
+~/.config/wenjv/  (兼容回退 ~/.config/inquisitive/)
   ├── backend.env      # 后端覆盖项
   ├── frontend.env     # 前端覆盖项
-  ├── inquisitive.db   # SQLite
+  ├── wenjv.db         # SQLite (兼容回退 inquisitive.db)
   ├── uploads/         # 上传与笔记文件
   ├── lance_db/        # 默认向量库数据
   └── logs/
@@ -297,7 +306,7 @@ pytest tests/test_smoke_architecture.py -q
 - **本机自用**：保证 8000 / 5173 空闲即可。  
 - **局域网 / 公网**：务必配置 HTTPS、修改 `SECRET_KEY`、收紧 CORS，并建议在反向代理（如 Nginx）后暴露。  
 - **删除资源**：默认从数据库与向量库移除记录；磁盘上的原始文件可能仍保留在 `uploads/`，请按需自行清理或后续扩展硬删策略。  
-- **备份**：定期备份 `~/.config/inquisitive/` 整个目录。
+- **备份**：定期备份 `~/.config/wenjv/`（或历史兼容 `~/.config/inquisitive/`）整个目录。
 
 ---
 
@@ -317,14 +326,14 @@ Copyright (C) 2026 Lanzao
 
 对外提供网络服务时，请遵守 AGPL 对源码提供的要求。
 
-> 说明：Python 包名与 CLI 入口仍为 `inquisitive-*`，配置目录默认为 `~/.config/inquisitive/`，仅为兼容已有安装路径，与产品展示名「个人知识库」无关。
+> 说明：主推 CLI 命令为 `wenjv-start*`，配置目录为 `~/.config/wenjv/`，数据库文件为 `wenjv.db`。系统同时 100% 向下兼容历史 `inquisitive-start*` 命令、`~/.config/inquisitive/` 目录与 `inquisitive.db` 数据库。
 
 ---
 
 ## 快速自检清单
 
 1. `ollama serve` 正常，已 pull embedding 与至少一个对话模型  
-2. `inquisitive-start-backend` 无报错，`/ping` 返回 pong  
+2. `wenjv-start-backend`（或 `inquisitive-start-backend`）无报错，`/ping` 返回 pong  
 3. `backend.env` 已设置 `SECRET_KEY`  
 4. 前端能注册/登录，上传一篇 md 或 pdf，任务状态变为 finished  
 5. 在聊天中提问，侧栏出现引用，回答为流式输出  

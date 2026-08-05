@@ -96,7 +96,7 @@ async def get_admin_page():
 <head>
     <meta charset="UTF-8">
     <meta http-equiv="refresh" content="30">
-    <title>Inquisitive RAG Observability Admin</title>
+    <title>wenjv RAG Observability Admin</title>
     <style>
         body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background-color: #121212; color: #e0e0e0; margin: 0; padding: 20px; }}
         .banner {{ background-color: #5c1616; color: #ff9999; padding: 14px 20px; border-radius: 6px; font-weight: bold; margin-bottom: 25px; border: 1px solid #8c2020; font-size: 15px; display: flex; align-items: center; }}
@@ -185,7 +185,7 @@ async def get_admin_page():
         </tbody>
     </table>
 
-    <div class="footer">页面自动刷新中 (30s) • Inquisitive RAG Observability v1.4</div>
+    <div class="footer">页面自动刷新中 (30s) • wenjv RAG Observability v1.4</div>
 </body>
 </html>"""
     return html_content

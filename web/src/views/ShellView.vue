@@ -4,7 +4,7 @@
       <div class="left">
         <div class="brand">
           <span class="mark" aria-hidden="true"><Icon name="logo" :size="26" /></span>
-          <span class="logo">知识库</span>
+          <span class="logo">wenjv</span>
         </div>
         <nav class="seg nav-seg">
           <router-link to="/" custom v-slot="{ href, navigate, isExactActive }">

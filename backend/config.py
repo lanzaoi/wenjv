@@ -8,18 +8,26 @@ import os
 import json
 
 
-def get_env_file_path():
-    """Get the path to the .env file in the base directory"""
-    home_dir = os.path.expanduser("~")
-    base_dir = os.path.join(home_dir, ".config", "inquisitive")
+from backend.core.paths import (  # noqa: E402
+    resolve_base_dir,
+    resolve_sqlite_db_path,
+)
 
+
+def get_env_file_path():
+    """Get the path to the .env file in the resolved base directory.
+
+    Only mkdir the chosen dir after resolution so we never create an empty
+    ~/.config/wenjv shell that would block legacy fallback on later runs.
+    """
+    base_dir = resolve_base_dir()
     Path(base_dir).mkdir(parents=True, exist_ok=True)
 
     env_file_path = os.path.join(base_dir, "backend.env")
 
     if not os.path.exists(env_file_path):
-        with open(env_file_path, 'w') as f:
-            f.write("# Backend environment variables for personal knowledge base\n")
+        with open(env_file_path, "w", encoding="utf-8") as f:
+            f.write("# Backend environment variables for wenjv (问据)\n")
 
     return env_file_path
 
@@ -29,8 +37,9 @@ def get_env_file_path():
 # However, if we decide to override default directory locations
 # then we need to make sure that one needs to create
 # all the relevant directories and sub-directories manually.
-# Data layout under BASE_DIR (default: ~/.config/inquisitive):
-#   uploads/  logs/  inquisitive.db  lance_db/
+# Data layout under BASE_DIR (default prefer ~/.config/wenjv; legacy
+# ~/.config/inquisitive if that has data and wenjv is empty/missing):
+#   uploads/  logs/  wenjv.db (or inquisitive.db)  lance_db/
 class Settings(BaseSettings):
     # BASIC SERVER SETTINGS
     SERVER_HOST: str = "0.0.0.0"
@@ -45,7 +54,7 @@ class Settings(BaseSettings):
     CONFIG_DIR_PATH: Path = Path(CONFIG_DIR)
     CONFIG_DIR_PATH.mkdir(exist_ok=True)
 
-    BASE_DIR: str = os.path.join(CONFIG_DIR, "inquisitive")
+    BASE_DIR: str = resolve_base_dir()
     BASE_DIR_PATH: Path = Path(BASE_DIR)
     BASE_DIR_PATH.mkdir(exist_ok=True)
 
@@ -79,6 +88,24 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def extend_upload_extensions(self) -> "Settings":
+        if "BASE_DIR" in self.__pydantic_fields_set__:
+            self.BASE_DIR_PATH = Path(self.BASE_DIR)
+            self.BASE_DIR_PATH.mkdir(parents=True, exist_ok=True)
+            self.UPLOAD_DIR = os.path.join(self.BASE_DIR, "uploads")
+            self.UPLOAD_DIR_PATH = Path(self.UPLOAD_DIR)
+            self.UPLOAD_DIR_PATH.mkdir(parents=True, exist_ok=True)
+            self.LOGS_DIR = os.path.join(self.BASE_DIR, "logs")
+            self.LOGS_DIR_PATH = Path(self.LOGS_DIR)
+            self.LOGS_DIR_PATH.mkdir(parents=True, exist_ok=True)
+            self.LOG_FILE_NAME = os.path.join(self.LOGS_DIR, "backend.log")
+            self.CHROMA_VECTOR_STORE_PERSISTS_DIRECTORY = os.path.join(self.BASE_DIR, "chroma_db")
+            self.MILVUS_VECTOR_STORE_URL = os.path.join(self.BASE_DIR, "milvus_data.db")
+            self.LANCE_DB_VECTOR_STORE_PERSISTS_DIRECTOY = os.path.join(self.BASE_DIR, "lance_db")
+            self.CACHE_DIR = os.path.join(self.BASE_DIR, "cache.db")
+            if "SQLITE_DB_PATH" not in self.__pydantic_fields_set__:
+                self.SQLITE_DB_PATH = resolve_sqlite_db_path(self.BASE_DIR)
+                self.DATABASE_URL = f"sqlite+aiosqlite:///{self.SQLITE_DB_PATH}"
+
         from backend.core.image_ingest_gate import image_ingest_allowed
         allowed, _ = image_ingest_allowed(self)
         if allowed:
@@ -92,7 +119,7 @@ class Settings(BaseSettings):
         return self
 
     # Sqlite Path
-    SQLITE_DB_PATH: str = os.path.join(BASE_DIR, "inquisitive.db")
+    SQLITE_DB_PATH: str = resolve_sqlite_db_path(BASE_DIR)
 
     # Vector store path
     CHROMA_VECTOR_STORE_PERSISTS_DIRECTORY: str = os.path.join(

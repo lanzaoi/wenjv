@@ -94,7 +94,9 @@ def main():
     # --- Turn hybrid OFF ---
     # We need to restart backend with HYBRID_SEARCH_ENABLED=false
     # For now, read current config
-    env_path = os.path.expanduser("~/.config/inquisitive/backend.env")
+    env_path = os.path.expanduser("~/.config/wenjv/backend.env")
+    if not os.path.exists(env_path):
+        env_path = os.path.expanduser("~/.config/inquisitive/backend.env")
     print(f"\n⚠️  To run hybrid OFF comparison, set HYBRID_SEARCH_ENABLED=false in")
     print(f"   {env_path}")
     print(f"   Then restart backend and re-run with --off flag\n")

@@ -9,6 +9,7 @@ env/
 logs/
 users.db
 inquisitive.db
+wenjv.db
 milvus_data.db
 chroma_db/
 lance_db/

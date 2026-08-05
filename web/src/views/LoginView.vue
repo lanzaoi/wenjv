@@ -4,8 +4,8 @@
     <div class="card auth-card">
       <div class="brand">
         <div class="mark"><Icon name="logo" :size="52" /></div>
-        <h1>个人知识库</h1>
-        <p class="muted">登录以管理笔记、文件与问答</p>
+        <h1>wenjv</h1>
+        <p class="muted">问据 · 笔记 / 文件 / 有引用的问答</p>
       </div>
       <div v-if="error" class="error-banner">
         <Icon name="x" :size="15" />

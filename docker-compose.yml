@@ -3,15 +3,18 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: inquisitive-api:latest
+    image: wenjv-api:latest
     ports:
       - "8000:8000"
     # IMPORTANT: Never hardcode SECRET_KEY or API_KEY in this file or in the Dockerfile.
-    # Environment configuration is read from ~/.config/inquisitive/backend.env (not tracked in Git).
-    # On Windows: %USERPROFILE%\.config\inquisitive\backend.env
-    # On Linux/macOS: ~/.config/inquisitive/backend.env
+    # Config is read from the mounted dir's backend.env (not tracked in Git).
+    #
+    # Host path (left side):
+    #   - Default: ~/.config/wenjv  (Windows: %USERPROFILE%\.config\wenjv)
+    #   - Legacy data still under inquisitive? set:
+    #       WENJV_CONFIG_DIR=%USERPROFILE%\.config\inquisitive
+    #     or migrate files into ~/.config/wenjv first.
+    # Container path is always /home/appuser/.config/wenjv (matches app primary name).
     volumes:
-      # Bind mount host configuration and data directory to container's non-root user home directory.
-      # This ensures persistence for SQLite (inquisitive.db), LanceDB vector store, and loads backend.env.
-      - ${USERPROFILE:-${HOME:-~}}/.config/inquisitive:/home/appuser/.config/inquisitive
+      - ${WENJV_CONFIG_DIR:-${USERPROFILE:-${HOME:-~}}/.config/wenjv}:/home/appuser/.config/wenjv
     restart: unless-stopped

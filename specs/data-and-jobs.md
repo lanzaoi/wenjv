@@ -49,7 +49,7 @@ API：
 ## 5. 配置
 
 - 任务并发、轮询、stale 时间：`backend/config.py` / `backend.env`。  
-- 数据目录默认 `~/.config/inquisitive/`（历史路径，兼容保留）。
+- 数据目录默认 `~/.config/wenjv/`（自动回退历史路径 `~/.config/inquisitive/`）。
 
 ## 6. 迁移
 

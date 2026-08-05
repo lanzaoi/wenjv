@@ -10,8 +10,17 @@ set "RUNTIME_ENV=%ROOT%\start\kb_runtime.env"
 set "BACKEND_HOST=127.0.0.1"
 set "BACKEND_PORT_START=8000"
 set "FRONTEND_PORT=5173"
-set "ENV_FILE=%USERPROFILE%\.config\inquisitive\backend.env"
-set "FE_ENV=%USERPROFILE%\.config\inquisitive\frontend.env"
+set "CONF_DIR="
+for /f "usebackq delims=" %%i in (`"%VENV_PY%" -c "import sys; sys.path.insert(0, r'%ROOT%'); from start.kb_launcher import get_config_dir; print(get_config_dir())"`) do set "CONF_DIR=%%i"
+if not defined CONF_DIR (
+  set "CONF_DIR=%USERPROFILE%\.config\wenjv"
+  if not exist "%CONF_DIR%\backend.env" if not exist "%CONF_DIR%\wenjv.db" if not exist "%CONF_DIR%\inquisitive.db" (
+    if exist "%USERPROFILE%\.config\inquisitive\inquisitive.db" set "CONF_DIR=%USERPROFILE%\.config\inquisitive"
+    if exist "%USERPROFILE%\.config\inquisitive\backend.env" set "CONF_DIR=%USERPROFILE%\.config\inquisitive"
+  )
+)
+set "ENV_FILE=%CONF_DIR%\backend.env"
+set "FE_ENV=%CONF_DIR%\frontend.env"
 set "WEB_DIR=%ROOT%\web"
 
 echo.

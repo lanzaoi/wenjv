@@ -1,5 +1,5 @@
 """
-Ingest SciFact corpus into inquisitive knowledge base as notes.
+Ingest SciFact corpus into wenjv knowledge base as notes.
 
 Usage:
   cd inquisitive-master
@@ -120,15 +120,15 @@ async def ingest_batch(docs, token: str, start_idx: int = 0, count: int = 0):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Ingest SciFact corpus into inquisitive")
+    parser = argparse.ArgumentParser(description="Ingest SciFact corpus into wenjv")
     parser.add_argument("--count", type=int, default=50,
                         help="How many docs to ingest (default: 50, 0=all)")
     parser.add_argument("--start", type=int, default=0,
                         help="Start index (for resuming)")
     parser.add_argument("--email", type=str, required=True,
-                        help="Your inquisitive user email")
+                        help="Your wenjv user email")
     parser.add_argument("--password", type=str, default="password",
-                        help="Your inquisitive user password")
+                        help="Your wenjv user password")
     parser.add_argument("--list", action="store_true",
                         help="Just list what would be ingested")
     parser.add_argument("--token", type=str, default="",

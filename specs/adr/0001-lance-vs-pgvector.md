@@ -6,7 +6,7 @@
 
 ## 背景与架构语境 (Context)
 
-个人知识库（Inquisitive）定位为一款轻量级、低维护成本、高度隐私自托管的知识管理与 Retrieval-Augmented Generation (RAG) 系统。在 v1.3 版本架构固化（Hardening）与评估（Evaluation）阶段，为了支撑三路召回（Vector + FTS5 + Structured）与异步分块入库，我们需要对底层的向量数据库引擎进行确定性的技术选型。
+wenjv（问据）知识库定位为一款轻量级、低维护成本、高度隐私自托管的知识管理与 Retrieval-Augmented Generation (RAG) 系统。在 v1.3 版本架构固化（Hardening）与评估（Evaluation）阶段，为了支撑三路召回（Vector + FTS5 + Structured）与异步分块入库，我们需要对底层的向量数据库引擎进行确定性的技术选型。
 
 评估核心聚焦于两个关键备选方案：
 1. **LanceDB**: 嵌入式列式存储向量引擎，基于 Apache Arrow 与 Lance 文件格式，支持零服务器部署与本地直接读写。
@@ -19,7 +19,7 @@
 具体的决策依据如下：
 
 1. **零依赖与极简部署 (Zero-Dependency Deployment)**
-   个人知识库的核心设计目标之一是「开箱即用」。LanceDB 属于嵌入式引擎，直接随 Python 进程启动并读写本地磁盘目录（`~/.config/inquisitive/lance_db/`），无需用户配置独立的 Docker 数据库容器、管理连接池或维护后台常驻守护进程。
+   wenjv 知识库的核心设计目标之一是「开箱即用」。LanceDB 属于嵌入式引擎，直接随 Python 进程启动并读写本地磁盘目录（`~/.config/wenjv/lance_db/`，自动兼容回退 `~/.config/inquisitive/lance_db/`），无需用户配置独立的 Docker 数据库容器、管理连接池或维护后台常驻守护进程。
 2. **个人库规模性能过剩 (Sufficient for Personal KB Scale)**
    在个人应用场景下（通常是万级至十万级切块 Chunking），LanceDB 基于 Arrow 的内存映射（mmap）查询极快，查询延迟稳定在毫秒级。结合我们的 SQLite FTS5 倒排索引，无需引入外部系统即可完美支撑日常高频问答与检索。
 3. **分层清晰与架构可插拔 (Pluggable Adapter Interface)**
@@ -32,7 +32,7 @@
 
 ### 正向收益 (Positive)
 - **降低内存与资源开销**：宿主机内存占用大幅降至最低，非常适合个人服务器、NAS 及笔记本电脑本地自托管部署。
-- **备份极简化**：向量库与 SQLite 元关系库处于同一宿主机目录（`~/.config/inquisitive/`），进行系统迁移或备份时只需直接对目录打包。
+- **备份极简化**：向量库与 SQLite 元关系库处于同一宿主机目录（`~/.config/wenjv/`，自动兼容回退 `~/.config/inquisitive/`），进行系统迁移或备份时只需直接对目录打包。
 
 ### 约束与未来演进路线 (Limitations & Scaling Path)
 - **多写并发限制**：由于 LanceDB 依赖底层文件锁机制，在面对团队级多用户写入、大规模高并发持续 Ingestion 场景时，会遭遇写竞态阻塞。

@@ -183,7 +183,7 @@ Specify  →  Plan  →  Implement  →  Verify  →  (Update specs)
 
 ### 3.2 建议项目标题
 
-**自托管个人知识库（FastAPI + RAG）｜规范驱动的 AI 辅助工程实践**
+**wenjv（问据）自托管知识库（FastAPI + RAG）｜规范驱动的 AI 辅助工程实践**
 
 ### 3.3 技能条可写
 
@@ -213,7 +213,7 @@ Specify  →  Plan  →  Implement  →  Verify  →  (Update specs)
 
 | 段 | 内容草稿 |
 |----|----------|
-| **S** Situation | 个人知识库要从能跑 Demo 升级为可维护的 CRUD+RAG；若纯对话指挥 AI，易范围膨胀、能力说不清。 |
+| **S** Situation | wenjv 知识库要从能跑 Demo 升级为可维护的 CRUD+RAG；若纯对话指挥 AI，易范围膨胀、能力说不清。 |
 | **T** Task | 建立可重复的人机协作流程，在有限时间内完成路由拆分、durable jobs、parsers、chat SSE 等，并保持可验证。 |
 | **A** Action | ① 建立 `specs/`（架构/API/RAG/安全/范围）；② `.hermes/plans` 任务切片；③ 每任务限定路径与验收命令；④ pytest 冒烟 + ad-hoc 验证；⑤ 能力边界写入 product-scope（如 HNSW/权重/Memory）。 |
 | **R** Result | 主链路可演示（上传→任务→检索→带引用对话）；文档与实现一致；返工集中在单 Task 而非全盘推翻。（*补你的耗时/模块数*） |

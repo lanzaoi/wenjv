@@ -602,6 +602,44 @@ async def _execute_document(session: AsyncSession, job: IngestionJob, payload: d
         except Exception as mm_err:
             logger.warning(f"Multimodal ingestion failed for {file_name} (fail-open): {mm_err}")
 
+    elif lower_name.endswith((".pptx", ".ppt")) and settings.MULTIMODAL_ENABLED:
+        try:
+            from backend.parsers.pptx_parser import extract_pptx_image_blobs
+            from backend.core.visual_assets import VisualAssetStore
+            from langchain_core.documents import Document
+
+            blobs = await asyncio.to_thread(extract_pptx_image_blobs, original_file_path, max_images=20)
+            if blobs:
+                pptx_img_docs = []
+                for idx, blob in enumerate(blobs, start=1):
+                    saved_path = VisualAssetStore.save_visual_asset(
+                        resource_id=str(job.resource_id),
+                        filename=f"slide_img_{idx}.jpg",
+                        image_bytes=blob,
+                        standardize=True,
+                    )
+                    doc = Document(
+                        page_content=f"[PPTX Image {idx} from {file_name}]",
+                        metadata={
+                            "source": file_url,
+                            "filename": file_name,
+                            "belongs_to": job.user_email,
+                            "user_id": str(job.user_id) if job.user_id is not None else None,
+                            "file_id": str(job.resource_id),
+                            "resource_id": str(job.resource_id),
+                            "image_path": saved_path,
+                            "source_type": "file",
+                            "page": str(idx),
+                        },
+                    )
+                    pptx_img_docs.append(doc)
+
+                if pptx_img_docs:
+                    from backend.vector_store.lance_db import add_visual_documents
+                    await asyncio.to_thread(add_visual_documents, pptx_img_docs)
+        except Exception as pptx_err:
+            logger.warning(f"PPTX visual ingestion failed for {file_name} (fail-open): {pptx_err}")
+
     # Auto-tagging & metadata enhancement (guaranteed fail-open)
     try:
         from backend.core.auto_tagger import generate_document_tags

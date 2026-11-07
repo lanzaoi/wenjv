@@ -119,19 +119,25 @@ async def get_document_asset_image(
     import os
 
     # Authenticate: either current user from header or validate query token
-    is_authed = user is not None
-    if not is_authed and token:
+    authed_user_id = user.id if user else None
+    if authed_user_id is None and token:
         val = validate_jwt_token(token)
         if val.get("valid"):
-            is_authed = True
+            authed_user_id = val.get("user_id")
 
-    if not is_authed:
+    if authed_user_id is None:
         raise HTTPException(status_code=401, detail="Authentication required to view asset")
 
     upload_root = Path(settings.UPLOAD_DIR).resolve()
 
     if path:
-        target_path = Path(path).resolve()
+        # Resolve target path relative to upload_root if relative (M7)
+        raw_p = Path(path)
+        if raw_p.is_absolute():
+            target_path = raw_p.resolve()
+        else:
+            target_path = (upload_root / path.lstrip("/")).resolve()
+
         # Security: enforce target path is inside upload_root using Path.is_relative_to
         try:
             if not target_path.is_relative_to(upload_root):
@@ -140,15 +146,31 @@ async def get_document_asset_image(
             if not str(target_path).startswith(str(upload_root) + os.sep):
                 raise HTTPException(status_code=403, detail="Access denied: asset path outside upload directory")
 
+        # Security: Tenant isolation on session images (H1)
+        # mm_assets/sessions/{user_id}/{session_id}/...
+        try:
+            rel_to_upload = target_path.relative_to(upload_root)
+            parts = rel_to_upload.parts
+            if len(parts) >= 3 and parts[0] == "mm_assets" and parts[1] == "sessions":
+                owner_uid = parts[2]
+                if str(authed_user_id) != str(owner_uid):
+                    raise HTTPException(status_code=403, detail="Access denied: cannot access another user's session asset")
+        except ValueError:
+            pass
+
         if not target_path.is_file():
             raise HTTPException(status_code=404, detail="Image asset not found")
 
         ext = target_path.suffix.lower()
-        if ext not in {".jpg", ".jpeg", ".png", ".webp", ".svg"}:
+        if ext not in {".jpg", ".jpeg", ".png", ".webp"}:
             raise HTTPException(status_code=400, detail="Invalid image asset extension")
 
         media_type = "image/jpeg" if ext in {".jpg", ".jpeg"} else "image/png" if ext == ".png" else f"image/{ext.lstrip('.')}"
-        return FileResponse(path=str(target_path), media_type=media_type)
+        return FileResponse(
+            path=str(target_path),
+            media_type=media_type,
+            headers={"Cache-Control": "private, max-age=3600"},
+        )
 
     if pdf and page:
         from backend.core.utils import is_allowed_upload_filename
@@ -238,8 +260,10 @@ async def _search_by_image_impl(
             try:
                 import unittest.mock
                 if not isinstance(search_service.search_documents, (unittest.mock.Mock, unittest.mock.MagicMock, unittest.mock.AsyncMock)):
+                    import asyncio
                     from backend.vector_store.lance_db import fetch_visual_documents
-                    vis_hits = fetch_visual_documents(
+                    vis_hits = await asyncio.to_thread(
+                        fetch_visual_documents,
                         image_bytes=content,
                         window_size=window_size or 5,
                         username=user.email,

@@ -11,6 +11,7 @@ from backend.api.routers import (
     job_router,
     document_router,
     chat_router,
+    attachments_router,
 )
 from backend.api.routers.admin import router as admin_router
 from backend.worker.url_processor_recursive import process_recursive_url_queue
@@ -38,7 +39,13 @@ async def lifespan(app: FastAPI):
     await start_job_workers()
     # Experimental crawl still uses in-memory queue
     asyncio.create_task(process_recursive_url_queue())
-    yield
+    from backend.core.asset_gc import periodic_asset_gc_worker, cleanup_expired_session_assets
+    await asyncio.to_thread(cleanup_expired_session_assets)
+    gc_task = asyncio.create_task(periodic_asset_gc_worker())
+    try:
+        yield
+    finally:
+        gc_task.cancel()
 
 
 app = FastAPI(title="wenjv API", lifespan=lifespan)
@@ -55,8 +62,11 @@ app.include_router(auth_router, prefix="/auth")
 app.include_router(file_router, prefix="/file")
 app.include_router(link_router, prefix="/links")
 app.include_router(document_router, prefix="/documents")
+app.include_router(document_router, prefix="/api/documents")
 app.include_router(job_router, prefix="/jobs")
 app.include_router(chat_router, prefix="/chat")
+app.include_router(chat_router, prefix="/api/chat")
+app.include_router(attachments_router, prefix="")
 app.include_router(admin_router, prefix="/admin")
 
 

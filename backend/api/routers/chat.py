@@ -29,6 +29,7 @@ class ChatRequest(BaseModel):
     tags: Optional[List[str]] = None
     history: Optional[List[ChatMessage]] = None
     use_rag: bool = True
+    images: Optional[List[str]] = None
 
 
 @chat_router.post("")
@@ -52,6 +53,18 @@ async def chat_rag(
                 }
                 for m in body.history
             ]
+        query_image_bytes = None
+        unresolved_count = 0
+        if body.images:
+            import asyncio
+            from backend.core.visual_assets import VisualAssetStore
+            for img_ident in body.images:
+                resolved = await asyncio.to_thread(VisualAssetStore.resolve_image_from_identifier, img_ident)
+                if resolved and query_image_bytes is None:
+                    query_image_bytes = resolved[0]
+                elif not resolved:
+                    unresolved_count += 1
+
         async for event in chat_service.rag_chat_events(
             question=body.question,
             user_email=user.email,
@@ -64,6 +77,7 @@ async def chat_rag(
             tags=body.tags,
             history=history,
             use_rag=body.use_rag,
+            query_image_bytes=query_image_bytes,
         ):
             yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
 
@@ -102,8 +116,11 @@ async def chat_by_image(
         if len(content) > max_bytes:
             raise HTTPException(status_code=413, detail=f"File exceeds max size of {max_bytes} bytes")
         question = await extract_text_from_image_bytes(content, filename=file.filename)
-    except ImageExtractionError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    except ImageExtractionError:
+        # Fallback (M2): pure image without extractable text is legitimate for vision VLM
+        question = "请详细分析并说明这张图片的内容与关键信息。"
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail="Internal server error extracting image")
 

@@ -196,6 +196,19 @@ export async function streamChat(token, payload, onEvent, signal) {
   await readSSE(res, onEvent)
 }
 
+export async function uploadChatAttachment(token, file, sessionId) {
+  const fd = new FormData()
+  fd.append('file', file, file.name)
+  if (sessionId) fd.append('session_id', sessionId)
+  const res = await fetch(`${API_BASE}/chat/attachments`, {
+    method: 'POST',
+    headers: authHeaders(token),
+    body: fd,
+  })
+  if (!res.ok) await parseError(res)
+  return res.json()
+}
+
 export async function streamChatByImage(token, file, fields, onEvent, signal) {
   const fd = new FormData()
   fd.append('file', file, file.name)

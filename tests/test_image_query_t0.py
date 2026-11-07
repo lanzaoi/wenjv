@@ -204,16 +204,28 @@ async def test_chat_by_image_success():
 
 @pytest.mark.asyncio
 async def test_chat_by_image_extract_fail():
+    """Verify that when OCR extraction fails, M2 kicks in and falls back to vision chat (200)."""
     app.dependency_overrides[current_active_user] = override_current_user
     try:
         with patch("backend.core.image_query_gate.validate_image_query_upload", side_effect=_ok_gate), \
-             patch("backend.core.image_ingest.extract_text_from_image_bytes", new_callable=AsyncMock) as mock_extract:
+             patch("backend.core.image_ingest.extract_text_from_image_bytes", new_callable=AsyncMock) as mock_extract, \
+             patch("backend.api.routers.chat.chat_service.rag_chat_events") as mock_chat:
+
             mock_extract.side_effect = ImageExtractionError("extract fail")
+
+            async def dummy_events(*args, **kwargs):
+                yield {"type": "done"}
+
+            mock_chat.side_effect = dummy_events
 
             with open(__file__, "rb") as f:
                 res = client.post("/chat/by-image", files={"file": ("test.png", f, "image/png")})
 
-            assert res.status_code == 400
-            assert "extract fail" in res.json()["detail"]
+            assert res.status_code == 200
+            assert "done" in res.text
+            mock_extract.assert_called_once()
+            mock_chat.assert_called_once()
+            # M2 fallback prompt check
+            assert "请详细分析并说明" in mock_chat.call_args[1]["question"]
     finally:
         app.dependency_overrides = {}

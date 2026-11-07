@@ -92,8 +92,13 @@ def _compute_query_hash(
     source_type: Optional[str],
     window_size: int,
     tags: Optional[List[str]] = None,
+    query_image_bytes: Optional[bytes] = None,
 ) -> str:
     import json
+    img_sig = None
+    if query_image_bytes:
+        img_sig = hashlib.sha256(query_image_bytes).hexdigest()[:16]
+
     data = {
         "p": prompt,
         "inc": sorted(include_sources) if include_sources else None,
@@ -101,6 +106,7 @@ def _compute_query_hash(
         "st": source_type,
         "w": window_size,
         "tg": sorted(tags) if tags else None,
+        "img": img_sig,
     }
     raw = json.dumps(data, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
@@ -271,6 +277,7 @@ async def search_documents(
             source_type,
             window_size,
             all_target_tags if all_target_tags else None,
+            query_image_bytes=query_image_bytes,
         )
         
         t0 = time.perf_counter()
@@ -484,7 +491,8 @@ async def search_documents(
                 t0 = time.perf_counter()
                 try:
                     from backend.vector_store.lance_db import fetch_visual_documents
-                    vis_hits = fetch_visual_documents(
+                    vis_hits = await asyncio.to_thread(
+                        fetch_visual_documents,
                         prompt=(clean_prompt or prompt) if not query_image_bytes else None,
                         image_bytes=query_image_bytes,
                         window_size=fetch_limit,
@@ -743,6 +751,7 @@ async def search_documents(
                     source_type=source_type,
                     user_id=user_id,
                     tags=None,
+                    query_image_bytes=query_image_bytes,
                 )
                 existing_ids = {_get_stable_id(doc) for doc, _ in final_results}
                 for fb_doc, fb_score in fallback_results:

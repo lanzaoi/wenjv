@@ -277,20 +277,50 @@
       </div>
 
       <form class="composer card" @submit.prevent="sendText">
+        <!-- Attached image thumbnail overlay in composer -->
+        <div v-if="attachedImage" class="composer-attachment-preview">
+          <div class="attachment-thumb-wrap">
+            <img :src="attachedImage.preview_url" class="attachment-thumb" alt="待发送图片" />
+            <button type="button" class="attachment-remove-btn" @click="removeAttachedImage" title="移除图片">
+              <Icon name="x" :size="14" />
+            </button>
+          </div>
+          <span class="attachment-name">{{ attachedImage.name }}</span>
+        </div>
+
         <textarea
           ref="promptEl"
           v-model="prompt"
           rows="1"
-          placeholder="提出关于已录入知识的问题…"
+          placeholder="提出问题，或粘贴/上传截图直接对话…"
           @keydown.enter.exact.prevent="sendText"
           @input="autoGrow"
+          @paste="handlePaste"
         />
         <div class="composer-actions">
-          <span class="muted kbd-hint">Enter 发送 · Shift+Enter 换行</span>
+          <input
+            ref="fileInputEl"
+            type="file"
+            accept="image/*"
+            style="display: none"
+            @change="onFileSelected"
+          />
+          <button
+            class="btn btn-ghost btn-icon attach-btn"
+            type="button"
+            :disabled="busy || uploadingAttachment"
+            title="上传图片"
+            aria-label="上传图片"
+            @click="fileInputEl && fileInputEl.click()"
+          >
+            <span v-if="uploadingAttachment" class="spinner" />
+            <Icon v-else name="image" :size="18" />
+          </button>
+          <span class="muted kbd-hint">可直接粘贴截图 · Enter 发送</span>
           <button
             class="btn btn-primary btn-icon send-btn"
             type="submit"
-            :disabled="!prompt.trim() || busy"
+            :disabled="(!prompt.trim() && !attachedImage) || busy || uploadingAttachment"
             :title="busy ? '处理中…' : '发送'"
             aria-label="发送"
           >
@@ -330,6 +360,7 @@ import {
   searchByImage,
   streamChat,
   streamChatByImage,
+  uploadChatAttachment,
   listChatModels,
   getTags,
 } from '../api/client'
@@ -372,7 +403,61 @@ const linkUrl = ref('')
 const t0File = ref(null)
 const scrollEl = ref(null)
 const promptEl = ref(null)
+const fileInputEl = ref(null)
 let abortCtrl = null
+
+// Composer attached image
+const attachedImage = ref(null)
+const uploadingAttachment = ref(false)
+
+async function onFileSelected(e) {
+  const f = e.target.files?.[0]
+  if (!f) return
+  await handleAttachFile(f)
+  if (fileInputEl.value) fileInputEl.value.value = ''
+}
+
+async function handleAttachFile(f) {
+  if (!f.type.startsWith('image/')) {
+    alert('请选择图片文件')
+    return
+  }
+  uploadingAttachment.value = true
+  try {
+    const res = await uploadChatAttachment(auth.token, f)
+    attachedImage.value = {
+      media_url: res.media_url,
+      preview_url: URL.createObjectURL(f),
+      name: f.name,
+    }
+  } catch (err) {
+    alert(`图片上传失败: ${err.message}`)
+  } finally {
+    uploadingAttachment.value = false
+  }
+}
+
+function removeAttachedImage() {
+  if (attachedImage.value?.preview_url) {
+    URL.revokeObjectURL(attachedImage.value.preview_url)
+  }
+  attachedImage.value = null
+}
+
+function handlePaste(e) {
+  const items = e.clipboardData?.items
+  if (!items) return
+  for (const item of items) {
+    if (item.type.startsWith('image/')) {
+      const f = item.getAsFile()
+      if (f) {
+        handleAttachFile(f)
+        e.preventDefault()
+        break
+      }
+    }
+  }
+}
 
 // Tagging state
 const availableTags = ref([])
@@ -544,18 +629,30 @@ function renderMd(text) {
 
 async function sendText() {
   const q = prompt.value.trim()
-  if (!q || busy.value) return
+  const img = attachedImage.value
+  if ((!q && !img) || busy.value) return
+
   prompt.value = ''
   nextTick(autoGrow)
-  chat.pushMessage({ role: 'user', content: q })
+
+  const effectiveText = q || '请详细分析这张图片。'
+  chat.pushMessage({
+    role: 'user',
+    content: effectiveText,
+    imageUrl: img ? getCitationImageUrl({ image_url: img.media_url }) : undefined,
+    mediaUrl: img ? img.media_url : undefined,
+  })
   chat.clearCitations()
+
+  const attachedMediaUrl = img ? img.media_url : undefined
+  removeAttachedImage()
 
   if (mode.value === 'refs') {
     chat.busy = true
     try {
       const r = await searchDocuments(
         auth.token,
-        q,
+        effectiveText,
         windowSize.value,
         null,
         selectedTags.value.length ? selectedTags.value : null,
@@ -575,20 +672,29 @@ async function sendText() {
     return
   }
 
-  // history excludes the user message we just pushed, rebuild like before
+  // history excludes the user message we just pushed
   const hist = messages.value
     .filter((m) => m.role === 'user' || m.role === 'assistant')
     .slice(0, -1)
     .slice(-8)
-    .map((m) => ({ role: m.role, content: m.content }))
+    .map((m) => {
+      const entry = { role: m.role, content: m.content }
+      if (m.mediaUrl) {
+        entry.images = [m.mediaUrl]
+      } else if (m.imageUrl) {
+        entry.images = [m.imageUrl]
+      }
+      return entry
+    })
 
   await runStreamChat({
-    question: q,
+    question: effectiveText,
     model: model.value || null,
     window_size: windowSize.value,
     use_rag: mode.value === 'rag',
     tags: selectedTags.value.length ? selectedTags.value : undefined,
     history: hist,
+    images: attachedMediaUrl ? [attachedMediaUrl] : undefined,
   })
 }
 
@@ -1315,6 +1421,66 @@ function onSse(ev) {
 }
 .modal-close:hover {
   opacity: 0.8;
+}
+
+/* Composer Attachment Preview */
+.composer-attachment-preview {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  background: var(--surface-secondary, rgba(0, 0, 0, 0.03));
+  border-bottom: 1px solid var(--border);
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+}
+.attachment-thumb-wrap {
+  position: relative;
+  width: 48px;
+  height: 48px;
+  border-radius: 6px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  background: #fff;
+  flex-shrink: 0;
+}
+.attachment-thumb {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.attachment-remove-btn {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  border: none;
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  padding: 0;
+}
+.attachment-remove-btn:hover {
+  background: rgba(255, 59, 48, 0.9);
+}
+.attachment-name {
+  font-size: 13px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 260px;
+}
+.attach-btn {
+  color: var(--text-secondary);
+  margin-right: auto;
+}
+.attach-btn:hover {
+  color: var(--accent);
+  background: rgba(0, 113, 227, 0.08);
 }
 
 </style>

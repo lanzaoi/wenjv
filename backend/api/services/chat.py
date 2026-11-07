@@ -146,7 +146,7 @@ async def stream_ollama_chat(
 def is_vision_model(model_name: str) -> bool:
     """Check if model explicitly supports OpenAI/multimodal image_url format."""
     name = (model_name or "").lower()
-    return any(k in name for k in ("vl", "vision", "4o", "gemini", "gemma", "pixtral", "claude"))
+    return any(k in name for k in ("vl", "vision", "4o", "gemini", "gemma", "pixtral", "claude", "qwen3-vl", "qwen2.5-vl", "qwen2-vl", "minicpm-v", "glm-4v"))
 
 
 async def stream_openai_chat(
@@ -471,11 +471,6 @@ async def rag_chat_events(
                 )
         yield {"type": "citations", "citations": citations}
 
-        if use_rag and not hits and getattr(settings, "RAG_REFUSE_ON_EMPTY", True):
-            yield {"type": "token", "content": "抱歉，知识库中未找到相关依据，无法回答该问题。"}
-            yield {"type": "done"}
-            return
-
         if use_rag and getattr(settings, "LOST_IN_THE_MIDDLE_ENABLED", True) and len(hits) > 2:
             from backend.api.services.search import arrange_lost_in_the_middle
             context_hits = arrange_lost_in_the_middle(hits)
@@ -486,7 +481,7 @@ async def rag_chat_events(
         images_payload: List[Dict[str, str]] = []
 
         if query_image_bytes:
-            std_query = compress_and_standardize_image(query_image_bytes, max_dimension=1280)
+            std_query = await asyncio.to_thread(compress_and_standardize_image, query_image_bytes, 1568, 90)
             images_payload.append({
                 "mime_type": "image/jpeg",
                 "data": base64.b64encode(std_query).decode("ascii"),
@@ -494,13 +489,33 @@ async def rag_chat_events(
             })
 
         if use_rag and context_hits:
-            visual_evidences = VisualAssetStore.resolve_hit_images(context_hits, max_images=3)
+            visual_evidences = await asyncio.to_thread(VisualAssetStore.resolve_hit_images, context_hits, 3)
             for ve in visual_evidences:
+                # Ensure hit images are standardized and size-budgeted (M1)
+                safe_bytes = await asyncio.to_thread(compress_and_standardize_image, ve.image_bytes, 1280, 85)
                 images_payload.append({
-                    "mime_type": ve.mime_type,
-                    "data": base64.b64encode(ve.image_bytes).decode("ascii"),
+                    "mime_type": "image/jpeg",
+                    "data": base64.b64encode(safe_bytes).decode("ascii"),
                     "label": ve.label,
                 })
+
+        # Refusal check: If using RAG and no hits were found AND no images (neither query image nor visual hits), refuse.
+        # If user provided an image, the image itself is visual grounding evidence! Never refuse when image is present.
+        has_any_visual_evidence = bool(images_payload)
+        if not has_any_visual_evidence and history:
+            # Check if any recent history message has images
+            for h in history[-2:]:
+                if h.get("images"):
+                    has_any_visual_evidence = True
+                    break
+
+        if use_rag and not hits and not has_any_visual_evidence and getattr(settings, "RAG_REFUSE_ON_EMPTY", True):
+            yield {"type": "token", "content": "抱歉，知识库中未找到相关依据，无法回答该问题。"}
+            yield {"type": "done"}
+            return
+
+        if images_payload:
+            yield {"type": "status", "message": "正在解析多模态视觉细节并推理..."}
 
         context = build_context_block(context_hits) if use_rag else ""
         if images_payload:

@@ -163,3 +163,17 @@ def test_kb_launcher_get_config_dir_matches(tmp_home):
     # empty primary shell
     _cfg(tmp_home, "wenjv")
     assert get_config_dir() == legacy
+
+
+def test_wenjv_launcher_and_alias(tmp_home):
+    from backend.core.paths import dir_has_wenjv_data, dir_has_kb_data
+    assert dir_has_kb_data is dir_has_wenjv_data
+
+    from start.wenjv_launcher import get_config_dir as wenjv_get_config_dir
+    from start.kb_launcher import get_config_dir as kb_get_config_dir
+
+    legacy = _cfg(tmp_home, "inquisitive")
+    (legacy / "backend.env").write_text("A=1\n", encoding="utf-8")
+    _cfg(tmp_home, "wenjv")
+    assert wenjv_get_config_dir() == legacy
+    assert kb_get_config_dir() == legacy

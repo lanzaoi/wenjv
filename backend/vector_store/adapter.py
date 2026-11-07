@@ -13,7 +13,8 @@ elif settings.DEFAULT_VECTOR_DB == StoreEngine.MILVUS_LITE:
 def _wrap_embeddings(vs):
     if vs is not None and hasattr(vs, "embeddings"):
         from backend.core.embedding_cache import CachedEmbedder
-        if not isinstance(vs.embeddings, CachedEmbedder):
+        from backend.core.micro_batch_embedder import MicroBatchEmbedder
+        if not isinstance(vs.embeddings, (CachedEmbedder, MicroBatchEmbedder)):
             vs.embeddings = CachedEmbedder(vs.embeddings)
     return vs
 
@@ -23,14 +24,14 @@ def _wrap_s2l_ingestion(vs):
         return vs
     orig_add_uploaded = getattr(vs, "add_uploaded_document_content_to_vector_store", None)
     if orig_add_uploaded and not getattr(orig_add_uploaded, "_is_s2l_wrapped", False):
-        def wrapped_add_uploaded(file_path, file_name, file_url, file_id, username, user_id=None):
-            if not getattr(settings, "SMALL_TO_LARGE_ENABLED", False):
-                return orig_add_uploaded(file_path, file_name, file_url, file_id, username, user_id=user_id)
+        def wrapped_add_uploaded(file_path, file_name, file_url, file_id, username, user_id=None, parsed_chunks=None):
+            if not getattr(settings, "CHUNK_EXPAND_ENABLED", False):
+                return orig_add_uploaded(file_path, file_name, file_url, file_id, username, user_id=user_id, parsed_chunks=parsed_chunks)
             from backend.core.utils import load_and_chunk_document
             from backend.vector_store.models import SourceType
             from langchain_core.documents import Document
             
-            texts = load_and_chunk_document(file_path, resource_id=str(file_id))
+            texts = load_and_chunk_document(file_path, resource_id=str(file_id), parsed_chunks=parsed_chunks)
             if file_name.endswith('.md') or file_name.endswith('.markdown'):
                 source_type = SourceType.NOTE
             else:
@@ -62,7 +63,7 @@ def _wrap_s2l_ingestion(vs):
     orig_add_link = getattr(vs, "add_link_content_to_vector_store", None)
     if orig_add_link and not getattr(orig_add_link, "_is_s2l_wrapped", False):
         def wrapped_add_link(link_id, url, title, text_content, username, user_id=None):
-            if not getattr(settings, "SMALL_TO_LARGE_ENABLED", False):
+            if not getattr(settings, "CHUNK_EXPAND_ENABLED", False):
                 return orig_add_link(link_id, url, title, text_content, username, user_id=user_id)
             from backend.core.utils import chunk_link_content
             from backend.vector_store.models import SourceType

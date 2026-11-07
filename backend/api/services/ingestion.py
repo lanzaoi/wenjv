@@ -21,6 +21,7 @@ async def queue_document(
     file_path: str,
     file_name: str,
     file_url: str,
+    tags: Optional[list[str]] = None,
 ):
     return await enqueue_document_job(
         session,
@@ -31,6 +32,7 @@ async def queue_document(
         file_path=file_path,
         file_name=file_name,
         file_url=file_url,
+        tags=tags,
     )
 
 
@@ -42,6 +44,7 @@ async def queue_link(
     user_id: int,
     user_email: str,
     headers: Optional[dict] = None,
+    tags: Optional[list[str]] = None,
 ):
     return await enqueue_link_job(
         session,
@@ -50,4 +53,5 @@ async def queue_link(
         user_id=user_id,
         user_email=user_email,
         headers=headers,
+        tags=tags,
     )

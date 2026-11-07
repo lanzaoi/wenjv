@@ -20,8 +20,8 @@ class OCRConfigError(OCRError):
     """Raised when OCR is enabled but misconfigured"""
     pass
 
-async def _submit_and_poll(file_tuple: tuple) -> str:
-    if settings.OCR_MODE == "off":
+async def _submit_and_poll(file_tuple: tuple, force: bool = False) -> str:
+    if not force and settings.OCR_MODE == "off":
         return ""
         
     token = settings.OCR_AISTUDIO_ACCESS_TOKEN
@@ -194,8 +194,8 @@ async def ocr_file(file_path: str) -> str:
         
     return await _submit_and_poll((filename, file_bytes, "application/octet-stream"))
 
-async def ocr_image_bytes(png_bytes: bytes) -> str:
+async def ocr_image_bytes(png_bytes: bytes, force: bool = False) -> str:
     """Same flow for single image bytes."""
-    if settings.OCR_MODE == "off":
+    if not force and settings.OCR_MODE == "off":
         return ""
-    return await _submit_and_poll(("image.png", png_bytes, "image/png"))
+    return await _submit_and_poll(("image.png", png_bytes, "image/png"), force=force)

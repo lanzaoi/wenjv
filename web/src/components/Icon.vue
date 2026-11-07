@@ -68,6 +68,10 @@
         <path d="M12 4.5v2.2M12 17.3v2.2M4.5 12h2.2M17.3 12h2.2M6.9 6.9l1.5 1.5M15.6 15.6l1.5 1.5M17.1 6.9l-1.5 1.5M8.4 15.6l-1.5 1.5" />
         <circle cx="12" cy="12" r="2.4" />
       </template>
+      <template v-else-if="name === 'tag'">
+        <path d="M20.5 13.5 12 5H5v7l8.5 8.5a2.12 2.12 0 0 0 3 0l4-4a2.12 2.12 0 0 0 0-3Z" />
+        <circle cx="8" cy="8" r="1.5" />
+      </template>
       <template v-else-if="name === 'check'">
         <path d="m5.5 12.5 4.2 4.2 8.8-9.4" />
       </template>

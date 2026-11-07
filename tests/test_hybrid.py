@@ -8,22 +8,21 @@ def _mock_doc(content, id_str):
     return Document(page_content=content, metadata={"id": id_str})
 
 @pytest.fixture(autouse=True)
-def reset_settings():
+def reset_settings(monkeypatch):
     # Reset settings before each test
-    settings.HYBRID_SEARCH_ENABLED = False
-    settings.HYBRID_KEYWORD_BACKEND = "fts5"
-    settings.HYBRID_VECTOR_MAX_DISTANCE = 0.8
-    settings.HYBRID_RRF_K = 5
-    settings.HYBRID_RRF_WEIGHT_VECTOR = 1.0
-    settings.HYBRID_RRF_WEIGHT_KEYWORD = 1.0
-    settings.HYBRID_RRF_WEIGHT_STRUCTURED = 1.0
-    settings.RERANK_ENABLED = False
-    settings.STRUCTURED_RECALL_ENABLED = False
-    yield
+    monkeypatch.setattr(settings, "HYBRID_SEARCH_ENABLED", False)
+    monkeypatch.setattr(settings, "HYBRID_KEYWORD_BACKEND", "fts5")
+    monkeypatch.setattr(settings, "HYBRID_VECTOR_MAX_DISTANCE", 0.8)
+    monkeypatch.setattr(settings, "HYBRID_RRF_K", 5)
+    monkeypatch.setattr(settings, "HYBRID_RRF_WEIGHT_VECTOR", 1.0)
+    monkeypatch.setattr(settings, "HYBRID_RRF_WEIGHT_KEYWORD", 1.0)
+    monkeypatch.setattr(settings, "HYBRID_RRF_WEIGHT_STRUCTURED", 1.0)
+    monkeypatch.setattr(settings, "RERANK_ENABLED", False)
+    monkeypatch.setattr(settings, "STRUCTURED_RECALL_ENABLED", False)
 
 @pytest.mark.asyncio
-async def test_hybrid_off_vector_only():
-    settings.HYBRID_SEARCH_ENABLED = False
+async def test_hybrid_off_vector_only(monkeypatch):
+    monkeypatch.setattr(settings, "HYBRID_SEARCH_ENABLED", False)
     
     with patch('backend.api.services.search.vector_store') as m_store, \
          patch('backend.core.fts5_utils.match_fts5') as m_fts5:
@@ -40,9 +39,9 @@ async def test_hybrid_off_vector_only():
         m_store.fetch_documents_keyword.assert_not_called()
 
 @pytest.mark.asyncio
-async def test_empty_keyword_returns_vector():
-    settings.HYBRID_SEARCH_ENABLED = True
-    settings.HYBRID_KEYWORD_BACKEND = "fts5"
+async def test_empty_keyword_returns_vector(monkeypatch):
+    monkeypatch.setattr(settings, "HYBRID_SEARCH_ENABLED", True)
+    monkeypatch.setattr(settings, "HYBRID_KEYWORD_BACKEND", "fts5")
     
     with patch('backend.api.services.search.vector_store') as m_store, \
          patch('backend.core.fts5_utils.match_fts5', return_value=[]) as m_fts5:
@@ -59,9 +58,9 @@ async def test_empty_keyword_returns_vector():
         assert results[0][1] == 0.1  # Native vector distance is returned
 
 @pytest.mark.asyncio
-async def test_backend_like():
-    settings.HYBRID_SEARCH_ENABLED = True
-    settings.HYBRID_KEYWORD_BACKEND = "like"
+async def test_backend_like(monkeypatch):
+    monkeypatch.setattr(settings, "HYBRID_SEARCH_ENABLED", True)
+    monkeypatch.setattr(settings, "HYBRID_KEYWORD_BACKEND", "like")
     
     with patch('backend.api.services.search.vector_store') as m_store, \
          patch('backend.core.fts5_utils.match_fts5') as m_fts5:
@@ -77,10 +76,10 @@ async def test_backend_like():
         m_store.fetch_documents_keyword.assert_called_once()
 
 @pytest.mark.asyncio
-async def test_hybrid_vector_distance_filter():
-    settings.HYBRID_SEARCH_ENABLED = True
-    settings.HYBRID_KEYWORD_BACKEND = "fts5"
-    settings.HYBRID_VECTOR_MAX_DISTANCE = 0.8
+async def test_hybrid_vector_distance_filter(monkeypatch):
+    monkeypatch.setattr(settings, "HYBRID_SEARCH_ENABLED", True)
+    monkeypatch.setattr(settings, "HYBRID_KEYWORD_BACKEND", "fts5")
+    monkeypatch.setattr(settings, "HYBRID_VECTOR_MAX_DISTANCE", 0.8)
     
     with patch('backend.api.services.search.vector_store') as m_store, \
          patch('backend.core.fts5_utils.match_fts5') as m_fts5:
@@ -102,12 +101,12 @@ async def test_hybrid_vector_distance_filter():
         assert "v2" not in ids
 
 @pytest.mark.asyncio
-async def test_weighted_rrf_vector_weight_dominates():
-    settings.HYBRID_SEARCH_ENABLED = True
-    settings.HYBRID_KEYWORD_BACKEND = "fts5"
-    settings.HYBRID_RRF_K = 5
-    settings.HYBRID_RRF_WEIGHT_VECTOR = 1.0
-    settings.HYBRID_RRF_WEIGHT_KEYWORD = 0.1  # Small weight
+async def test_weighted_rrf_vector_weight_dominates(monkeypatch):
+    monkeypatch.setattr(settings, "HYBRID_SEARCH_ENABLED", True)
+    monkeypatch.setattr(settings, "HYBRID_KEYWORD_BACKEND", "fts5")
+    monkeypatch.setattr(settings, "HYBRID_RRF_K", 5)
+    monkeypatch.setattr(settings, "HYBRID_RRF_WEIGHT_VECTOR", 1.0)
+    monkeypatch.setattr(settings, "HYBRID_RRF_WEIGHT_KEYWORD", 0.1)  # Small weight
     
     with patch('backend.api.services.search.vector_store') as m_store, \
          patch('backend.core.fts5_utils.match_fts5') as m_fts5:
@@ -123,11 +122,11 @@ async def test_weighted_rrf_vector_weight_dominates():
         assert results[1][0].metadata["id"] == "k1"
 
 @pytest.mark.asyncio
-async def test_mmr_integration():
-    settings.HYBRID_SEARCH_ENABLED = True
-    settings.MMR_ENABLED = True
-    settings.RERANK_CANDIDATES = 10
-    settings.MMR_LAMBDA = 0.5
+async def test_mmr_integration(monkeypatch):
+    monkeypatch.setattr(settings, "HYBRID_SEARCH_ENABLED", True)
+    monkeypatch.setattr(settings, "MMR_ENABLED", True)
+    monkeypatch.setattr(settings, "RERANK_CANDIDATES", 10)
+    monkeypatch.setattr(settings, "MMR_LAMBDA", 0.5)
     
     with patch('backend.api.services.search.vector_store') as m_store, \
          patch('backend.core.fts5_utils.match_fts5', return_value=[]), \
@@ -161,11 +160,11 @@ async def test_mmr_integration():
         assert results[1][0].metadata["id"] == "v3"
 
 @pytest.mark.asyncio
-async def test_rerank_integration():
-    settings.HYBRID_SEARCH_ENABLED = False
-    settings.MMR_ENABLED = False
-    settings.RERANK_ENABLED = True
-    settings.RERANK_CANDIDATES = 10
+async def test_rerank_integration(monkeypatch):
+    monkeypatch.setattr(settings, "HYBRID_SEARCH_ENABLED", False)
+    monkeypatch.setattr(settings, "MMR_ENABLED", False)
+    monkeypatch.setattr(settings, "RERANK_ENABLED", True)
+    monkeypatch.setattr(settings, "RERANK_CANDIDATES", 10)
     
     with patch('backend.api.services.search.vector_store') as m_store, \
          patch('backend.core.rerank_client.rerank', new_callable=AsyncMock) as m_rerank:

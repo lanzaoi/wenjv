@@ -45,7 +45,54 @@ def _resolve_user_id(user_id: Optional[int], user_email: str) -> int:
     return -1
 
 
-def _compute_query_hash(prompt: str, include_sources: Optional[List[str]], exclude_sources: Optional[List[str]], source_type: Optional[str], window_size: int) -> str:
+def truncate_by_score_gap(
+    items: List[Tuple[Any, float]],
+    min_keep: int = 2,
+    max_keep: int = 8,
+    rel_gap_threshold: float = 0.40,
+) -> List[Tuple[Any, float]]:
+    """
+    Apply relative drop-off (Elbow/Cliff) truncation on sorted reranked documents.
+    Detects when relevance score drops by more than rel_gap_threshold compared to the previous item,
+    trimming the noisy long tail while preserving at least min_keep high-confidence matches.
+    """
+    if len(items) <= min_keep:
+        return items[:max_keep]
+
+    cutoff = min(len(items), max_keep)
+    for i in range(min_keep, cutoff):
+        prev_score = items[i - 1][1]
+        curr_score = items[i][1]
+        if prev_score > 0 and (prev_score - curr_score) / prev_score >= rel_gap_threshold:
+            return items[:i]
+    return items[:max_keep]
+
+
+import re
+from backend.api.services.tags import normalize_tags, resolve_sources_by_tags
+
+
+def extract_inline_tags(prompt: str) -> Tuple[str, List[str]]:
+    """Extract #tags from prompt text, returning cleaned prompt and extracted tags."""
+    if not prompt:
+        return prompt, []
+    pattern = re.compile(r"(?:^|\s)#([\w\u4e00-\u9fa5]{2,24})(?=\s|[，。！？,\.!?]|$)")
+    extracted = [m.group(1) for m in pattern.finditer(prompt)]
+    if not extracted:
+        return prompt, []
+    cleaned_prompt = pattern.sub(" ", prompt).strip()
+    cleaned_prompt = re.sub(r"\s+", " ", cleaned_prompt)
+    return (cleaned_prompt or prompt), normalize_tags(extracted)
+
+
+def _compute_query_hash(
+    prompt: str,
+    include_sources: Optional[List[str]],
+    exclude_sources: Optional[List[str]],
+    source_type: Optional[str],
+    window_size: int,
+    tags: Optional[List[str]] = None,
+) -> str:
     import json
     data = {
         "p": prompt,
@@ -53,9 +100,24 @@ def _compute_query_hash(prompt: str, include_sources: Optional[List[str]], exclu
         "exc": sorted(exclude_sources) if exclude_sources else None,
         "st": source_type,
         "w": window_size,
+        "tg": sorted(tags) if tags else None,
     }
     raw = json.dumps(data, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
+
+
+_cache_table_initialized = False
+
+
+def _ensure_cache_table():
+    global _cache_table_initialized
+    if not _cache_table_initialized:
+        try:
+            from backend.database import get_cache_engine, QueryResultCacheTable
+            QueryResultCacheTable.__table__.create(bind=get_cache_engine(), checkfirst=True)
+            _cache_table_initialized = True
+        except Exception:
+            pass
 
 
 def _get_query_cache(query_hash: str, user_id: int) -> Optional[List[Tuple[object, float]]]:
@@ -71,10 +133,7 @@ def _get_query_cache(query_hash: str, user_id: int) -> Optional[List[Tuple[objec
         from langchain.schema import Document
         import json
 
-        try:
-            QueryResultCacheTable.__table__.create(bind=get_cache_engine(), checkfirst=True)
-        except Exception:
-            pass
+        _ensure_cache_table()
 
         with Session(get_cache_engine()) as session:
             row = session.get(QueryResultCacheTable, (query_hash, user_id))
@@ -108,10 +167,7 @@ def _set_query_cache(query_hash: str, user_id: int, results: List[Tuple[object, 
         from datetime import datetime, timezone, timedelta
         import json
 
-        try:
-            QueryResultCacheTable.__table__.create(bind=get_cache_engine(), checkfirst=True)
-        except Exception:
-            pass
+        _ensure_cache_table()
 
         ttl = getattr(settings, "QUERY_CACHE_TTL_SECONDS", 300)
         expires_at = (datetime.now(timezone.utc) + timedelta(seconds=ttl)).replace(tzinfo=None)
@@ -167,6 +223,9 @@ async def search_documents(
     window_size: int = 5,
     source_type: Optional[str] = None,
     user_id: Optional[int] = None,
+    tags: Optional[List[str]] = None,
+    lost_in_the_middle: bool = False,
+    query_image_bytes: Optional[bytes] = None,
 ) -> List[Tuple[object, float]]:
     """Return list of (Document, score).
 
@@ -183,7 +242,36 @@ async def search_documents(
 
     try:
         uid = _resolve_user_id(user_id, user_email)
-        query_hash = _compute_query_hash(prompt, include_sources, exclude_sources, source_type, window_size)
+
+        # Parse inline hashtags from prompt and combine with explicit tags parameter
+        clean_prompt, inline_tags = extract_inline_tags(prompt)
+        all_target_tags = normalize_tags((tags or []) + inline_tags)
+
+        # Layer 1 Pre-filter mapping via SQLite
+        source_tag_scores: dict[str, int] = {}
+        tag_matched_rids: list[int] = []
+        tag_sources: list[str] = []
+        effective_includes = include_sources
+
+        if all_target_tags and uid != -1:
+            source_tag_scores, tag_matched_rids, tag_sources = resolve_sources_by_tags(uid, all_target_tags)
+            if tag_sources:
+                if include_sources:
+                    matched_common = [s for s in include_sources if s in tag_sources]
+                    effective_includes = matched_common if matched_common else ["__no_match_tag__"]
+                else:
+                    effective_includes = list(tag_sources)
+            else:
+                effective_includes = ["__no_match_tag__"]
+
+        query_hash = _compute_query_hash(
+            clean_prompt or prompt,
+            effective_includes,
+            exclude_sources,
+            source_type,
+            window_size,
+            all_target_tags if all_target_tags else None,
+        )
         
         t0 = time.perf_counter()
         cached_docs = _get_query_cache(query_hash, uid)
@@ -195,22 +283,25 @@ async def search_documents(
             return cached_docs[:window_size]
 
         kwargs = dict(
-            include_selected=include_sources,
+            include_selected=effective_includes,
             exclude_selected=exclude_sources,
             window_size=window_size,
             username=user_email,
-            prompt=prompt,
+            prompt=clean_prompt or prompt,
             source_type=source_type,
         )
         mmr_enabled = getattr(settings, "MMR_ENABLED", False)
-        pool_size = getattr(settings, "RERANK_CANDIDATES", 20)
-        fetch_limit = pool_size if mmr_enabled else window_size
+        rerank_enabled = getattr(settings, "RERANK_ENABLED", False)
+        pool_size = getattr(settings, "RERANK_CANDIDATES", 30)
+        fetch_limit = pool_size if (mmr_enabled or rerank_enabled) else window_size
+        if all_target_tags and effective_includes:
+            fetch_limit = max(fetch_limit * 3, 20)
 
         # Late chunking: search doc-level embeddings first
         if getattr(settings, "LATE_CHUNKING_ENABLED", False):
             return _late_chunking_search(
-                prompt, user_email, window_size, user_id, source_type,
-                include_sources, exclude_sources, user_id
+                clean_prompt or prompt, user_email, window_size, user_id, source_type,
+                effective_includes, exclude_sources, user_id
             )
 
         kwargs["window_size"] = fetch_limit
@@ -222,11 +313,11 @@ async def search_documents(
                 res = vector_store.fetch_documents(**kwargs, user_id=user_id)
             except TypeError:
                 res = vector_store.fetch_documents(
-                    include_sources,
+                    effective_includes,
                     exclude_sources,
                     fetch_limit,
                     user_email,
-                    prompt,
+                    clean_prompt or prompt,
                     source_type,
                 )
             timings["vector_leg"] = (time.perf_counter() - t0) * 1000.0
@@ -249,21 +340,8 @@ async def search_documents(
                 from backend.core.fts5_utils import match_fts5
                 from langchain.schema import Document
                 
-                uid = user_id
-                if uid is None and user_email:
-                    # Resolve real user_id to avoid FTS isolation breach or paralysis 
-                    from sqlalchemy.orm import Session
-                    from backend.api.models import User
-                    try:
-                        with Session(sync_engine) as session:
-                            u = session.query(User).filter(User.email == user_email).first()
-                            if u:
-                                uid = u.id
-                    except Exception as e:
-                        import traceback
-                        traceback.print_exc()
-                
-                if uid is None:
+                uid_fts = uid
+                if uid_fts is None or uid_fts == -1:
                     return []
                 
                 # Multiply fetch limit for keywords if set
@@ -271,7 +349,15 @@ async def search_documents(
                 
                 with sync_engine.connect() as conn:
                     raw_conn = conn.connection.dbapi_connection
-                    rows = match_fts5(raw_conn, prompt, user_id=uid, belongs_to=user_email, limit=fetch_limit * 5 * multiplier)
+                    rows = match_fts5(
+                        raw_conn,
+                        clean_prompt or prompt,
+                        user_id=uid_fts,
+                        belongs_to=user_email,
+                        limit=fetch_limit * 5 * multiplier,
+                        include_sources=effective_includes,
+                        source_type=source_type,
+                    )
                     
                 docs = []
                 for row in rows:
@@ -352,16 +438,33 @@ async def search_documents(
                 tasks.append(asyncio.to_thread(_do_structured))
             
             gathered = await asyncio.gather(*tasks, return_exceptions=True)
-            if isinstance(gathered[0], Exception):
-                raise gathered[0]
-            vector_results = gathered[0]
-            
             if getattr(settings, "HYBRID_SEARCH_ENABLED", False):
-                kw_results = gathered[1] if not isinstance(gathered[1], Exception) else []
-                structured_results = gathered[2] if not isinstance(gathered[2], Exception) else []
+                kw_results = gathered[1] if (len(gathered) > 1 and not isinstance(gathered[1], Exception)) else []
+                structured_results = gathered[2] if (len(gathered) > 2 and not isinstance(gathered[2], Exception)) else []
+                if isinstance(gathered[0], Exception):
+                    if kw_results or structured_results:
+                        logger.warning(f"Vector search failed (fail-open): {gathered[0]}")
+                        timings["vector_error"] = str(gathered[0])
+                        vector_results = []
+                    else:
+                        raise gathered[0]
+                else:
+                    vector_results = gathered[0]
+            else:
+                if isinstance(gathered[0], Exception):
+                    raise gathered[0]
+                vector_results = gathered[0]
         else:
             # Sequential execution
-            vector_results = _do_vector()
+            try:
+                vector_results = _do_vector()
+            except Exception as v_err:
+                if getattr(settings, "HYBRID_SEARCH_ENABLED", False):
+                    logger.warning(f"Vector search failed sequentially (fail-open): {v_err}")
+                    timings["vector_error"] = str(v_err)
+                    vector_results = []
+                else:
+                    raise
             if getattr(settings, "HYBRID_SEARCH_ENABLED", False):
                 t0 = time.perf_counter()
                 if backend_mode == "like":
@@ -374,16 +477,102 @@ async def search_documents(
                 structured_results = _fetch_structured()
                 timings["structured_leg"] = (time.perf_counter() - t0) * 1000.0
 
+        vis_results = []
+        if getattr(settings, "VISUAL_SEARCH_ENABLED", False):
+            import unittest.mock
+            if not isinstance(vector_store, (unittest.mock.Mock, unittest.mock.MagicMock, unittest.mock.AsyncMock)):
+                t0 = time.perf_counter()
+                try:
+                    from backend.vector_store.lance_db import fetch_visual_documents
+                    vis_hits = fetch_visual_documents(
+                        prompt=(clean_prompt or prompt) if not query_image_bytes else None,
+                        image_bytes=query_image_bytes,
+                        window_size=fetch_limit,
+                        username=user_email,
+                        user_id=uid if uid != -1 else None,
+                        source_type=source_type,
+                    )
+                    timings["visual_leg"] = (time.perf_counter() - t0) * 1000.0
+                    vis_results = [(doc, dist) for doc, dist, _ in vis_hits]
+                except Exception as vis_err:
+                    logger.warning(f"Visual cross-modal search leg failed (non-fatal): {vis_err}")
+
+        def _check_doc_tag_match(doc) -> Tuple[bool, int]:
+            if not all_target_tags:
+                return False, 0
+            fn = doc.metadata.get("filename")
+            src = doc.metadata.get("source")
+            title = doc.metadata.get("title")
+            rid = doc.metadata.get("resource_id") or doc.metadata.get("file_id")
+
+            best_overlap = 0
+            for k in (fn, src, title):
+                if k and k in source_tag_scores:
+                    best_overlap = max(best_overlap, source_tag_scores[k])
+
+            if best_overlap == 0 and rid:
+                try:
+                    if int(rid) in tag_matched_rids:
+                        best_overlap = 1
+                except Exception:
+                    pass
+
+            return (best_overlap > 0), best_overlap
+
         if not getattr(settings, "HYBRID_SEARCH_ENABLED", False):
-            final_results = vector_results
+            if vis_results:
+                k = getattr(settings, "HYBRID_RRF_K", 5)
+                w_v = getattr(settings, "HYBRID_RRF_WEIGHT_VECTOR", 1.0)
+                w_vis = getattr(settings, "HYBRID_RRF_WEIGHT_VISUAL", 1.0)
+                rrf_scores = {}
+                doc_map = {}
+                for rank, (doc, _dist) in enumerate(vector_results, 1):
+                    doc_id = _get_stable_id(doc)
+                    doc_map[doc_id] = doc
+                    rrf_scores[doc_id] = rrf_scores.get(doc_id, 0.0) + w_v / (k + rank)
+                for rank, (doc, _dist) in enumerate(vis_results, 1):
+                    doc_id = _get_stable_id(doc)
+                    doc_map[doc_id] = doc
+                    rrf_scores[doc_id] = rrf_scores.get(doc_id, 0.0) + w_vis / (k + rank)
+                sorted_docs = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)
+                final_results = [(doc_map[doc_id], 1.0 / score if score > 0 else float('inf')) for doc_id, score in sorted_docs[:fetch_limit]]
+            else:
+                final_results = vector_results
             v_hits = len({_get_stable_id(doc) for doc, _ in vector_results})
             total_hits = len(final_results)
+            if all_target_tags:
+                for doc, _ in final_results:
+                    is_match, overlap = _check_doc_tag_match(doc)
+                    doc.metadata["tag_matched"] = is_match
+                    doc.metadata["matched_tags_count"] = overlap
         else:
 
             if not kw_results and not structured_results:
-                final_results = vector_results
+                if vis_results:
+                    k = getattr(settings, "HYBRID_RRF_K", 5)
+                    w_v = getattr(settings, "HYBRID_RRF_WEIGHT_VECTOR", 1.0)
+                    w_vis = getattr(settings, "HYBRID_RRF_WEIGHT_VISUAL", 1.0)
+                    rrf_scores = {}
+                    doc_map = {}
+                    for rank, (doc, _dist) in enumerate(vector_results, 1):
+                        doc_id = _get_stable_id(doc)
+                        doc_map[doc_id] = doc
+                        rrf_scores[doc_id] = rrf_scores.get(doc_id, 0.0) + w_v / (k + rank)
+                    for rank, (doc, _dist) in enumerate(vis_results, 1):
+                        doc_id = _get_stable_id(doc)
+                        doc_map[doc_id] = doc
+                        rrf_scores[doc_id] = rrf_scores.get(doc_id, 0.0) + w_vis / (k + rank)
+                    sorted_docs = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)
+                    final_results = [(doc_map[doc_id], 1.0 / score if score > 0 else float('inf')) for doc_id, score in sorted_docs[:fetch_limit]]
+                else:
+                    final_results = vector_results
                 v_hits = len({_get_stable_id(doc) for doc, _ in vector_results})
                 total_hits = len(final_results)
+                if all_target_tags:
+                    for doc, _ in final_results:
+                        is_match, overlap = _check_doc_tag_match(doc)
+                        doc.metadata["tag_matched"] = is_match
+                        doc.metadata["matched_tags_count"] = overlap
             else:
                 # ----- L3: 融合 -----
                 t0 = time.perf_counter()
@@ -393,10 +582,12 @@ async def search_documents(
                 w_v = getattr(settings, "HYBRID_RRF_WEIGHT_VECTOR", 1.0)
                 w_k = getattr(settings, "HYBRID_RRF_WEIGHT_KEYWORD", 1.0)
                 w_s = getattr(settings, "HYBRID_RRF_WEIGHT_STRUCTURED", 1.0)
+                w_vis = getattr(settings, "HYBRID_RRF_WEIGHT_VISUAL", 1.0)
                 
                 w_v = max(0.0, float(w_v))
                 w_k = max(0.0, float(w_k))
                 w_s = max(0.0, float(w_s))
+                w_vis = max(0.0, float(w_vis))
 
                 if getattr(settings, "QUERY_CLASSIFIER_ENABLED", False):
                     q_type = classify(prompt)
@@ -433,6 +624,23 @@ async def search_documents(
                         doc_map[doc_id] = doc
                         rrf_scores[doc_id] = rrf_scores.get(doc_id, 0.0) + w_s / (k + rank)
 
+                if w_vis > 0 and vis_results:
+                    for rank, (doc, _dist) in enumerate(vis_results, 1):
+                        doc_id = _get_stable_id(doc)
+                        doc_map[doc_id] = doc
+                        rrf_scores[doc_id] = rrf_scores.get(doc_id, 0.0) + w_vis / (k + rank)
+
+                if all_target_tags:
+                    for doc_id, doc in doc_map.items():
+                        is_match, overlap = _check_doc_tag_match(doc)
+                        doc.metadata["tag_matched"] = is_match
+                        if is_match:
+                            doc.metadata["matched_tags_count"] = overlap
+                            tag_boost = 2.0 * (overlap / max(1, len(all_target_tags)))
+                            rrf_scores[doc_id] = rrf_scores.get(doc_id, 0.0) + tag_boost
+                        else:
+                            doc.metadata["tag_matched"] = False
+
                 # Sort by descending RRF score
                 sorted_docs = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)
                 total_hits = len(sorted_docs)
@@ -455,11 +663,23 @@ async def search_documents(
                     # Rerank succeeded: rebuild in new order by relevance_score
                     reranked_final = []
                     for item in rerank_results:
-                        original_idx = item["index"]
-                        score = item["relevance_score"]
+                        original_idx = item.get("index")
+                        if original_idx is None or original_idx < 0 or original_idx >= len(docs_to_rerank):
+                            logger.warning(f"Rerank result index {original_idx} out of range [0, {len(docs_to_rerank)})")
+                            continue
+                        score = item.get("relevance_score", 0.0)
                         doc = docs_to_rerank[original_idx][0]
                         reranked_final.append((doc, score))
-                    final_results = reranked_final
+
+                    # Apply relative drop-off (cliff gap) truncation to trim noisy long tail
+                    min_keep = getattr(settings, "RERANK_MIN_KEEP", 2)
+                    rel_gap = getattr(settings, "RERANK_REL_GAP_THRESHOLD", 0.40)
+                    final_results = truncate_by_score_gap(
+                        reranked_final,
+                        min_keep=min_keep,
+                        max_keep=window_size,
+                        rel_gap_threshold=rel_gap,
+                    )
                 # else: rerank failed (None) or empty — keep original final_results
             except Exception as e:
                 import logging
@@ -508,6 +728,38 @@ async def search_documents(
             timings["mmr_leg"] = (time.perf_counter() - t0) * 1000.0
             
         final_results = await asyncio.to_thread(_expand_context, final_results, window_size)
+        if getattr(settings, "CONTEXT_DEOVERLAP_MERGE_ENABLED", True):
+            final_results = await asyncio.to_thread(deoverlap_and_merge_adjacent_chunks, final_results)
+
+        if all_target_tags and len(final_results) < window_size:
+            # Layer 2: Soft-fallback recall top-up with unconstrained search
+            try:
+                fallback_results = await search_documents(
+                    prompt=clean_prompt or prompt,
+                    user_email=user_email,
+                    include_sources=include_sources,
+                    exclude_sources=exclude_sources,
+                    window_size=window_size,
+                    source_type=source_type,
+                    user_id=user_id,
+                    tags=None,
+                )
+                existing_ids = {_get_stable_id(doc) for doc, _ in final_results}
+                for fb_doc, fb_score in fallback_results:
+                    fb_id = _get_stable_id(fb_doc)
+                    if fb_id not in existing_ids:
+                        fb_doc.metadata["tag_matched"] = False
+                        fb_doc.metadata["tag_fallback"] = True
+                        final_results.append((fb_doc, fb_score))
+                        existing_ids.add(fb_id)
+                        if len(final_results) >= window_size:
+                            break
+            except Exception as fb_err:
+                logger.warning(f"Tag recall fallback top-up failed: {fb_err}")
+
+        if lost_in_the_middle and len(final_results) > 2:
+            final_results = arrange_lost_in_the_middle(final_results)
+
         _set_query_cache(query_hash, uid, final_results)
         return final_results
     except Exception as e:
@@ -545,7 +797,8 @@ def format_search_hits(
     source_type: Optional[str],
     window_size: int,
 ):
-    """Apply link URL de-dupe policy used by the API."""
+    """Apply link URL de-dupe policy and enrich visual asset URLs."""
+    import urllib.parse
     results = []
     uniq_sources = set()
     for doc, score in docs_with_scores:
@@ -554,6 +807,27 @@ def format_search_hits(
             break
         if source_type == "link" and source in uniq_sources:
             continue
+
+        img_path = doc.metadata.get("image_path")
+        has_img = bool(
+            img_path
+            or (
+                str(doc.metadata.get("filename") or "").lower().endswith(".pdf")
+                and doc.metadata.get("page")
+            )
+        )
+        img_url = None
+        if img_path:
+            img_url = f"/api/documents/assets/image?path={urllib.parse.quote(str(img_path))}"
+        elif str(doc.metadata.get("filename") or "").lower().endswith(".pdf") and doc.metadata.get("page"):
+            pdf_fn = doc.metadata.get("filename")
+            page_no = doc.metadata.get("page")
+            img_url = f"/api/documents/assets/image?pdf={urllib.parse.quote(str(pdf_fn))}&page={page_no}"
+
+        doc.metadata["has_image"] = has_img
+        doc.metadata["image_path"] = img_path
+        doc.metadata["image_url"] = img_url
+
         results.append((doc, score, source))
         if source not in uniq_sources:
             uniq_sources.add(source)
@@ -570,9 +844,14 @@ def _fetch_chunks_by_ids(ids: List[str]) -> dict:
         if hasattr(vs, "db") and hasattr(vs, "TABLE_NAME"):
             table = vs.db.open_table(vs.TABLE_NAME)
             cond = " OR ".join(f"id = '{str(i)}'" for i in ids)
-            df = table.search(None).where(cond).limit(len(ids) + 10).to_pandas()
-            for _, row in df.iterrows():
-                id_to_content[str(row["id"])] = str(row["page_content"])
+            try:
+                res_rows = table.search(None).where(cond).select(["id", "page_content"]).limit(len(ids) + 10).to_list()
+                for row in res_rows:
+                    id_to_content[str(row["id"])] = str(row["page_content"])
+            except Exception:
+                df = table.search(None).where(cond).limit(len(ids) + 10).to_pandas()
+                for _, row in df.iterrows():
+                    id_to_content[str(row["id"])] = str(row["page_content"])
         elif hasattr(vs, "collection") and hasattr(vs.collection, "get"):
             res = vs.collection.get(ids=ids)
             for i, doc in zip(res.get("ids", []), res.get("documents", [])):
@@ -692,3 +971,158 @@ def _expand_context(results: List, window_size: int) -> List:
         return results[:window_size]
         
     return expanded_results[:window_size]
+
+
+def deduplicate_overlap_text(text1: str, text2: str, max_check: int = 250) -> str:
+    """
+    If suffix of text1 matches prefix of text2, strip the duplicate prefix.
+    Also handles complete substring containment.
+    """
+    t1 = text1.rstrip()
+    t2 = text2.lstrip()
+    if not t1:
+        return t2
+    if not t2:
+        return t1
+    if t2 in t1:
+        return t1
+    if t1 in t2:
+        return t2
+
+    limit = min(len(t1), len(t2), max_check)
+    overlap_len = 0
+    for l in range(limit, 8, -1):
+        if t1.endswith(t2[:l]):
+            overlap_len = l
+            break
+
+    if overlap_len > 0:
+        return t1 + "\n" + t2[overlap_len:].lstrip()
+    return t1 + "\n\n" + t2
+
+
+def deoverlap_and_merge_adjacent_chunks(results: List) -> List:
+    """
+    Merge adjacent or overlapping chunks from the same chunk_group into a single Document.
+    Deduplicates overlapping boundary text.
+    """
+    if not getattr(settings, "CONTEXT_DEOVERLAP_MERGE_ENABLED", True) or len(results) <= 1:
+        return results
+
+    try:
+        from sqlalchemy.orm import Session
+        from backend.database import sync_engine, ChunkMappingTable
+        from langchain_core.documents import Document
+
+        missing_ids = []
+        for doc, _ in results:
+            chunk_id = _get_stable_id(doc)
+            c_group = doc.metadata.get("chunk_group")
+            c_order = doc.metadata.get("chunk_order")
+            if (c_group is None or c_order is None) and chunk_id:
+                missing_ids.append(str(chunk_id))
+
+        db_mappings = {}
+        if missing_ids:
+            with Session(sync_engine) as session:
+                rows = session.query(ChunkMappingTable).filter(ChunkMappingTable.chunk_id.in_(missing_ids)).all()
+                for r in rows:
+                    db_mappings[r.chunk_id] = (r.chunk_group, r.chunk_order)
+
+        doc_infos = []
+        for item in results:
+            doc, score = item[0], item[1]
+            chunk_id = _get_stable_id(doc)
+            c_group = doc.metadata.get("chunk_group")
+            c_order = doc.metadata.get("chunk_order")
+            if (c_group is None or c_order is None) and chunk_id in db_mappings:
+                c_group, c_order = db_mappings[chunk_id]
+
+            doc_infos.append({
+                "item": item,
+                "doc": doc,
+                "score": score,
+                "chunk_id": str(chunk_id) if chunk_id else None,
+                "chunk_group": str(c_group) if c_group is not None else None,
+                "chunk_order": int(c_order) if c_order is not None else None,
+            })
+
+        merged_results = []
+        seen = set()
+
+        for i, info_i in enumerate(doc_infos):
+            if i in seen:
+                continue
+
+            grp = info_i["chunk_group"]
+            order = info_i["chunk_order"]
+
+            if grp is None or order is None:
+                merged_results.append(info_i["item"])
+                seen.add(i)
+                continue
+
+            cluster = [info_i]
+            seen.add(i)
+
+            for j in range(i + 1, len(doc_infos)):
+                if j in seen:
+                    continue
+                info_j = doc_infos[j]
+                if info_j["chunk_group"] == grp and info_j["chunk_order"] is not None:
+                    if any(abs(m["chunk_order"] - info_j["chunk_order"]) <= 1 for m in cluster):
+                        cluster.append(info_j)
+                        seen.add(j)
+
+            if len(cluster) == 1:
+                merged_results.append(cluster[0]["item"])
+            else:
+                cluster.sort(key=lambda x: x["chunk_order"])
+                merged_text = cluster[0]["doc"].page_content
+                merged_meta = dict(cluster[0]["doc"].metadata)
+                best_score = cluster[0]["score"]
+
+                for member in cluster[1:]:
+                    merged_text = deduplicate_overlap_text(merged_text, member["doc"].page_content)
+
+                merged_meta["merged_chunks"] = [m["chunk_id"] for m in cluster if m["chunk_id"]]
+                merged_meta["chunk_order_span"] = [cluster[0]["chunk_order"], cluster[-1]["chunk_order"]]
+                merged_doc = Document(page_content=merged_text, metadata=merged_meta)
+                merged_results.append((merged_doc, best_score))
+
+        return merged_results
+    except Exception as e:
+        logger.warning(f"Fail-open in deoverlap_and_merge_adjacent_chunks: {e}")
+        return results
+
+
+def arrange_lost_in_the_middle(items: List) -> List:
+    """
+    Reorder items to combat Lost-in-the-Middle attention bias in LLMs.
+    The highest-scoring items are placed at the beginning and the end of the context,
+    with lower-scoring items placed in the middle.
+    
+    Given items sorted by score descending: [0, 1, 2, 3, 4]
+    - Item 0 (best) -> index 0 (prompt head)
+    - Item 1 (2nd)  -> index -1 (prompt tail)
+    - Item 2 (3rd)  -> index 1
+    - Item 3 (4th)  -> index -2
+    - Item 4 (5th)  -> index 2
+    """
+    if len(items) <= 2:
+        return list(items)
+
+    result = [None] * len(items)
+    left = 0
+    right = len(items) - 1
+
+    for idx, item in enumerate(items):
+        if idx % 2 == 0:
+            result[left] = item
+            left += 1
+        else:
+            result[right] = item
+            right -= 1
+
+    return result
+

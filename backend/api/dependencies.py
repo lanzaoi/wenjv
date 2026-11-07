@@ -1,4 +1,4 @@
-# backend/auth/dependencies.py
+# backend/api/dependencies.py
 from typing import Optional
 
 from fastapi import Depends, Request
@@ -49,18 +49,17 @@ class UserManager(IntegerIDMixin, BaseUserManager[User, int]):
     verification_token_secret = settings.SECRET_KEY
 
     async def on_after_register(self, user: User, request: Optional[Request] = None):
-        print(f"User {user.id} has registered.")
+        logger.info("User registered", extra={"user_id": user.id})
 
     async def on_after_forgot_password(
         self, user: User, token: str, request: Optional[Request] = None
     ):
-        print(f"User {user.id} has forgot their password. Reset token: {token}")
+        logger.info("Password reset requested", extra={"user_id": user.id})
 
     async def on_after_request_verify(
         self, user: User, token: str, request: Optional[Request] = None
     ):
-        print(
-            f"Verification requested for user {user.id}. Verification token: {token}")
+        logger.info("Verification requested", extra={"user_id": user.id})
 
 # Get user database
 
@@ -81,4 +80,5 @@ fastapi_users = FastAPIUsers[User, int](
 
 # Current user dependencies
 current_active_user = fastapi_users.current_user(active=True)
+current_optional_user = fastapi_users.current_user(optional=True)
 current_superuser = fastapi_users.current_user(active=True, superuser=True)

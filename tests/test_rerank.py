@@ -140,3 +140,19 @@ async def test_rerank_404_returns_none():
     with patch("httpx.AsyncClient.post", new=mock_post_func):
         results = await rerank("query", ["doc1"])
         assert results is None
+
+
+@pytest.mark.asyncio
+async def test_rerank_local_onnx_success(monkeypatch):
+    """Test Local BGE Reranker ONNX provider sorts relevant docs first."""
+    monkeypatch.setattr(settings, "RERANK_ENABLED", True)
+    monkeypatch.setattr(settings, "RERANK_PROVIDER", "local_onnx")
+    docs = [
+        "知识库问据（wenjv）支持混合检索与重排序。",
+        "今天天气晴朗适合出门跑步。",
+    ]
+    results = await rerank("知识库问据", docs)
+    assert results is not None
+    assert len(results) == 2
+    assert results[0]["index"] == 0
+    assert results[0]["relevance_score"] > results[1]["relevance_score"]

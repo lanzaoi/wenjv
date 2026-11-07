@@ -1,4 +1,0 @@
-[console_scripts]
-inquisitive-start = start.launcher:main
-inquisitive-start-backend = backend.main:start_server
-inquisitive-start-ui = start.launcher:start_frontend_separately

@@ -30,10 +30,10 @@ def test_fetch_by_resource_with_resource_id():
         assert results[0][0].page_content == "chunk 1"
         assert results[0][0].metadata["resource_id"] == "1"
         
-        # Verify correct where clause
+        # Verify correct where clause (exact isolation match to prevent prefix collisions)
         where_expr = m_table.search.return_value.where.call_args[0][0]
-        assert "(user_id LIKE '%1%' OR belongs_to = 'test@test.com')" in where_expr
-        assert "(resource_id LIKE '%1%')" in where_expr
+        assert "(user_id = '1' OR belongs_to = 'test@test.com')" in where_expr
+        assert "resource_id = '1'" in where_expr
 
 def test_fetch_by_resource_fallback_file_id():
     # Test when schema has NO resource_id but has file_id
@@ -62,5 +62,5 @@ def test_fetch_by_resource_fallback_file_id():
         assert results[0][0].metadata["file_id"] == "1"
         
         where_expr = m_table.search.return_value.where.call_args[0][0]
-        assert "file_id LIKE '%1%'" in where_expr
+        assert "file_id = '1'" in where_expr
         assert "resource_id" not in where_expr

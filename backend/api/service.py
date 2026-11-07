@@ -5,8 +5,6 @@ from jose import jwt
 from backend.config import settings
 from backend.core.logging import get_logger
 
-# import logging
-
 logger = get_logger()
 
 
@@ -35,5 +33,5 @@ def validate_jwt_token(token: str) -> dict:
             "user_id": user_id
         }
     except Exception as e:
-        print(f"Token validation error: {e}")
+        logger.warning(f"Token validation error: {e}")
         return {"valid": False}

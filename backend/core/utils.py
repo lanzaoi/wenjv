@@ -1,8 +1,11 @@
-from pypdf import PdfReader
-import mimetypes
 import uuid
 import os
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+import hashlib
+import re
+try:
+    from langchain.text_splitter import RecursiveCharacterTextSplitter
+except ImportError:
+    from langchain_text_splitters import RecursiveCharacterTextSplitter
 from backend.config import settings
 import shutil
 from backend.core.logging import get_logger
@@ -17,11 +20,6 @@ text_splitter = RecursiveCharacterTextSplitter(
     length_function=len,
     separators=settings.TEXT_SPLITTER_SEPARATORS
 )
-
-
-def is_file_pdf(file_path):
-    mime_type, _ = mimetypes.guess_type(file_path)
-    return mime_type == 'application/pdf'
 
 
 def get_file_extension(filename: str) -> str:
@@ -47,13 +45,6 @@ def sanitize_upload_basename(filename: str) -> str:
     return safe[:180]
 
 
-def read_text_file_content(file_path):
-    text_content = ""
-    with open(file_path, 'r', encoding='utf-8') as file:
-        text_content = file.read()
-    return text_content
-
-
 def save_file(content, title):
     # Generate a unique ID
     doc_id = str(uuid.uuid4())
@@ -61,8 +52,8 @@ def save_file(content, title):
     # Create a filename
 
     saved = False
-    # Replace spaces with hyphen and remove special characters
-    safe_title = ''.join(c if c.isalnum() else '-' for c in title)
+    # Replace spaces with hyphen and remove special characters, cap length to avoid ENAMETOOLONG
+    safe_title = ''.join(c if c.isalnum() else '-' for c in title).strip('-')[:100] or "note"
     filename = f"{safe_title}-{doc_id}.md"
 
     file_path = os.path.join(settings.UPLOAD_DIR, filename)
@@ -77,33 +68,6 @@ def save_file(content, title):
         saved = False
 
     return doc_id, file_path, filename, saved
-
-
-def extract_text_from_pdf(pdf_file):
-    """Extract text from PDF file. Raises ValueError on failure/empty text."""
-    texts = []
-    try:
-        pdf_reader = PdfReader(pdf_file)
-        for i, page in enumerate(pdf_reader.pages):
-            page_text = page.extract_text() or ""
-            texts.append({
-                "text": page_text,
-                "page_number": i + 1
-            })
-    except Exception as err:
-        logger.error(f"Error processing {pdf_file}: {err}")
-        raise ValueError(f"PDF extraction failed: {err}") from err
-
-    if not texts:
-        raise ValueError("PDF has no pages")
-
-    joined = "".join((t.get("text") or "") for t in texts).strip()
-    if not joined:
-        raise ValueError(
-            "PDF text extraction returned empty content "
-            "(scanned/image-only PDFs are not supported yet)"
-        )
-    return texts
 
 
 def record_chunk_mappings(mappings: list):
@@ -138,6 +102,13 @@ def get_active_splitter():
     return text_splitter
 
 
+def generate_deterministic_chunk_id(resource_id: str, chunk_order: int, text_content: str, header_path: str = "") -> str:
+    """Generate a deterministic, content-anchored chunk ID that remains stable across re-indexing."""
+    content_snippet = text_content[:64] if text_content else ""
+    seed = f"{resource_id or '0'}:{header_path}:{chunk_order}:{content_snippet}"
+    return hashlib.sha256(seed.encode("utf-8")).hexdigest()[:24]
+
+
 def _process_chunks_with_mapping(raw_chunks: list, resource_id: str = None):
     is_s2l = getattr(settings, "CHUNK_EXPAND_ENABLED", False)
     if not is_s2l:
@@ -146,13 +117,31 @@ def _process_chunks_with_mapping(raw_chunks: list, resource_id: str = None):
     chunk_group = str(resource_id) if resource_id else str(uuid.uuid4())
     mappings = []
     out = []
+    total = len(raw_chunks)
+
+    # Generate IDs (deterministic if enabled)
+    chunk_ids = []
     for idx, item in enumerate(raw_chunks):
-        chunk_id = str(uuid.uuid4())
+        if getattr(settings, "CHUNK_DETERMINISTIC_ID_ENABLED", True):
+            cid = generate_deterministic_chunk_id(
+                resource_id=str(resource_id) if resource_id else "",
+                chunk_order=idx,
+                text_content=item.get("text", ""),
+                header_path=item.get("header_str", "")
+            )
+        else:
+            cid = str(uuid.uuid4())
+        chunk_ids.append(cid)
+
+    for idx, item in enumerate(raw_chunks):
+        chunk_id = chunk_ids[idx]
         item_copy = dict(item)
         item_copy["id"] = chunk_id
         item_copy["chunk_id"] = chunk_id
         item_copy["chunk_group"] = chunk_group
         item_copy["chunk_order"] = idx
+        item_copy["prev_chunk_id"] = chunk_ids[idx - 1] if idx > 0 else None
+        item_copy["next_chunk_id"] = chunk_ids[idx + 1] if idx < total - 1 else None
         mappings.append({
             "chunk_id": chunk_id,
             "chunk_group": chunk_group,
@@ -165,32 +154,10 @@ def _process_chunks_with_mapping(raw_chunks: list, resource_id: str = None):
 
 
 class ChunkString(str):
-    metadata: dict = {}
-
-
-def chunk_pdf_content(text_content_list, resource_id: str = None):
-    splitter = get_active_splitter()
-    texts = []
-    for content_dict in text_content_list:
-        text = content_dict["text"]
-        page_number = content_dict["page_number"]
-        for splitted_text in splitter.split_text(text):
-            texts.append({
-                "text": splitted_text,
-                "page_number": page_number
-            })
-    return _process_chunks_with_mapping(texts, resource_id=resource_id)
-
-
-def chunk_non_pdf_content(text_content, resource_id: str = None):
-    splitter = get_active_splitter()
-    texts = []
-    for i, splitted_text in enumerate(splitter.split_text(text_content)):
-        texts.append({
-            "text":  splitted_text,
-            "page_number": i + 1
-        })
-    return _process_chunks_with_mapping(texts, resource_id=resource_id)
+    def __new__(cls, content, metadata=None):
+        obj = super().__new__(cls, content)
+        obj.metadata = dict(metadata or {})
+        return obj
 
 
 def chunk_link_content(text_content, resource_id: str = None):
@@ -223,26 +190,71 @@ def chunk_link_content(text_content, resource_id: str = None):
     return out
 
 
-def load_and_chunk_document(file_path: str, resource_id: str = None):
+def load_and_chunk_document(file_path: str, resource_id: str = None, parsed_chunks: list = None):
     """
-    Parse file via parser registry, then apply text splitter.
+    Parse file via parser registry (or use parsed_chunks if already parsed), then apply text splitter.
     Returns list of {text, page_number}.
     """
-    from backend.parsers import parse_document
+    if parsed_chunks is not None:
+        parsed = parsed_chunks
+    else:
+        from backend.parsers import parse_document
+        parsed = parse_document(file_path)
 
-    parsed = parse_document(file_path)
     splitter = get_active_splitter()
     out = []
+    header_regex = re.compile(r'^(#{1,6})\s+(.+)$')
+
     for chunk in parsed:
         page_number = chunk.page_number
         body = chunk.text or ""
         if not body.strip():
             continue
-        for splitted_text in splitter.split_text(body):
-            out.append({
-                "text": splitted_text,
-                "page_number": page_number,
-            })
+
+        if getattr(settings, "STRUCTURE_AWARE_CHUNKING_ENABLED", True):
+            from backend.core.structure_chunker import structure_aware_chunk
+            structured = structure_aware_chunk(
+                body,
+                splitter=splitter,
+                max_atomic_size=getattr(settings, "MAX_ATOMIC_BLOCK_SIZE", 1200),
+                page_number=page_number,
+            )
+            out.extend(structured)
+        else:
+            # Extract markdown heading breadcrumbs if present
+            lines = body.split("\n")
+            breadcrumbs_stack = []
+            line_to_breadcrumb = {}
+            for l_idx, line in enumerate(lines):
+                m = header_regex.match(line.strip())
+                if m:
+                    level = len(m.group(1))
+                    title = m.group(2).strip()
+                    while breadcrumbs_stack and breadcrumbs_stack[-1][0] >= level:
+                        breadcrumbs_stack.pop()
+                    breadcrumbs_stack.append((level, title))
+                line_to_breadcrumb[l_idx] = " > ".join(t for _, t in breadcrumbs_stack)
+
+            char_cursor = 0
+            for splitted_text in splitter.split_text(body):
+                start_pos = body.find(splitted_text, char_cursor)
+                if start_pos == -1:
+                    start_pos = char_cursor
+                end_pos = start_pos + len(splitted_text)
+                char_cursor = end_pos
+
+                sub_lines = body[:start_pos].count("\n")
+                header_path_str = line_to_breadcrumb.get(sub_lines, "")
+                indexing_text = f"[{header_path_str}]\n\n{splitted_text}" if (header_path_str and getattr(settings, "BI_TEXT_INDEXING_ENABLED", True)) else splitted_text
+
+                out.append({
+                    "text": splitted_text,
+                    "indexing_text": indexing_text,
+                    "header_str": header_path_str,
+                    "start_char": start_pos,
+                    "end_char": end_pos,
+                    "page_number": page_number,
+                })
     if not out:
         raise ValueError(f"No text chunks produced for {file_path}")
     return _process_chunks_with_mapping(out, resource_id=resource_id)

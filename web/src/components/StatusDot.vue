@@ -15,7 +15,7 @@ const props = defineProps({
 
 const tone = computed(() => {
   const x = String(props.status || '').toLowerCase()
-  if (!x || x === '—' || x === '-') return 'neutral'
+  if (!x || x === '-' || x === '--') return 'neutral'
   if (x.includes('fail') || x.includes('error')) return 'fail'
   if (
     x.includes('finish') ||

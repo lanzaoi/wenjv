@@ -5,9 +5,9 @@ from backend.api.services.chat import rag_chat_events
 from backend.config import settings
 
 @pytest.mark.asyncio
-async def test_rag_refuse_on_empty():
+async def test_rag_refuse_on_empty(monkeypatch):
     """Test that when RAG_REFUSE_ON_EMPTY is true, empty retrieval triggers a refusal and avoids LLM call."""
-    settings.RAG_REFUSE_ON_EMPTY = True
+    monkeypatch.setattr(settings, "RAG_REFUSE_ON_EMPTY", True)
     
     with patch('backend.api.services.chat.search_service.search_documents') as m_search:
         # Mock empty hits
@@ -40,9 +40,9 @@ async def test_rag_refuse_on_empty():
                 m_ollama.assert_not_called()
 
 @pytest.mark.asyncio
-async def test_rag_does_not_refuse_if_turned_off():
+async def test_rag_does_not_refuse_if_turned_off(monkeypatch):
     """Test that if RAG_REFUSE_ON_EMPTY is false, it proceeds to call the LLM."""
-    settings.RAG_REFUSE_ON_EMPTY = False
+    monkeypatch.setattr(settings, "RAG_REFUSE_ON_EMPTY", False)
     
     with patch('backend.api.services.chat.search_service.search_documents') as m_search:
         m_search.return_value = []

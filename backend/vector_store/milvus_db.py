@@ -264,7 +264,6 @@ def fetch_documents(
     # Generate embedding for the query
     query_embedding = embeddings.embed_query(prompt)
 
-    print(query_embedding,  "qb")
     # Perform similarity search
     search_results = milvus_client.search(
         collection_name=COLLECTION_NAME,
@@ -275,7 +274,6 @@ def fetch_documents(
                        "belongs_to", "link_id", "file_id", "source_type"]
     )
 
-    print(search_results, "sr..")
     # Process search results
     docs_with_scores = []
     if search_results and 'data' in search_results and len(search_results['data']) > 0:

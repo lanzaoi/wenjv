@@ -13,15 +13,10 @@ from sqlalchemy import delete
 
 
 @pytest.fixture(autouse=True)
-def setup_caching_test():
-    # Save original settings
-    orig_embed_enabled = getattr(settings, "EMBEDDING_CACHE_ENABLED", True)
-    orig_query_enabled = getattr(settings, "QUERY_CACHE_ENABLED", True)
-    orig_ttl = getattr(settings, "QUERY_CACHE_TTL_SECONDS", 300)
-    
-    settings.EMBEDDING_CACHE_ENABLED = True
-    settings.QUERY_CACHE_ENABLED = True
-    settings.QUERY_CACHE_TTL_SECONDS = 300
+def setup_caching_test(monkeypatch):
+    monkeypatch.setattr(settings, "EMBEDDING_CACHE_ENABLED", True)
+    monkeypatch.setattr(settings, "QUERY_CACHE_ENABLED", True)
+    monkeypatch.setattr(settings, "QUERY_CACHE_TTL_SECONDS", 300)
     
     # Ensure cache tables exist before cleaning
     EmbedCacheTable.__table__.create(bind=get_cache_engine(), checkfirst=True)
@@ -32,12 +27,6 @@ def setup_caching_test():
         session.execute(delete(EmbedCacheTable))
         session.execute(delete(QueryResultCacheTable))
         session.commit()
-        
-    yield
-    
-    settings.EMBEDDING_CACHE_ENABLED = orig_embed_enabled
-    settings.QUERY_CACHE_ENABLED = orig_query_enabled
-    settings.QUERY_CACHE_TTL_SECONDS = orig_ttl
 
 
 def test_hash_determinism():
@@ -110,24 +99,24 @@ def test_fail_open():
     mock_api.embed_documents.assert_called_once_with(["doc1", "doc2"])
 
 
-def test_eval_bypass_mode():
+def test_eval_bypass_mode(monkeypatch):
     """测试 eval bypass 模式（EMBEDDING_CACHE_ENABLED=false -> 不读写）"""
     cache = EmbeddingCache()
     
     # Turn OFF embedding cache (eval bypass)
-    settings.EMBEDDING_CACHE_ENABLED = False
+    monkeypatch.setattr(settings, "EMBEDDING_CACHE_ENABLED", False)
     
     cache.set("eval_query", "model_eval", [0.8, 0.8])
     
     # Re-enable briefly to check if it was written
-    settings.EMBEDDING_CACHE_ENABLED = True
+    monkeypatch.setattr(settings, "EMBEDDING_CACHE_ENABLED", True)
     assert cache.get("eval_query", "model_eval") is None
     
     # Write while enabled, then turn OFF and verify get() returns None
     cache.set("eval_query", "model_eval", [0.8, 0.8])
     assert cache.get("eval_query", "model_eval") is not None
     
-    settings.EMBEDDING_CACHE_ENABLED = False
+    monkeypatch.setattr(settings, "EMBEDDING_CACHE_ENABLED", False)
     assert cache.get("eval_query", "model_eval") is None
     
     # Also verify CachedEmbedder bypasses cache
@@ -139,7 +128,7 @@ def test_eval_bypass_mode():
     mock_api.embed_query.assert_called_once_with("eval_query")
 
 
-def test_query_result_cache_ttl():
+def test_query_result_cache_ttl(monkeypatch):
     """测试 query result cache TTL 过期"""
     q_hash = _compute_query_hash("test ttl", None, None, None, 2)
     doc = Document(page_content="TTL test doc", metadata={"id": "doc_1"})
@@ -147,7 +136,7 @@ def test_query_result_cache_ttl():
     
     with patch("backend.api.services.search.vector_store", None):
         # 1. Normal TTL (300s) -> hit
-        settings.QUERY_CACHE_TTL_SECONDS = 300
+        monkeypatch.setattr(settings, "QUERY_CACHE_TTL_SECONDS", 300)
         _set_query_cache(q_hash, user_id=1, results=results)
         cached = _get_query_cache(q_hash, user_id=1)
         assert cached is not None
@@ -155,11 +144,11 @@ def test_query_result_cache_ttl():
         
         # 2. Expired TTL -> simulate by setting negative TTL when caching new item
         q_hash_expired = _compute_query_hash("expired query", None, None, None, 2)
-        settings.QUERY_CACHE_TTL_SECONDS = -10
+        monkeypatch.setattr(settings, "QUERY_CACHE_TTL_SECONDS", -10)
         _set_query_cache(q_hash_expired, user_id=1, results=results)
         
         # Restore normal TTL for reading, but entry expires_at is already in the past
-        settings.QUERY_CACHE_TTL_SECONDS = 300
+        monkeypatch.setattr(settings, "QUERY_CACHE_TTL_SECONDS", 300)
         expired_cached = _get_query_cache(q_hash_expired, user_id=1)
         assert expired_cached is None
 

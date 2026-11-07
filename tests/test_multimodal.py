@@ -90,27 +90,30 @@ async def test_generate_caption_both_fail(mock_settings):
 async def test_extract_tables_ocr_first(mock_settings):
     """OCR returns markdown table → parsed directly, no Gemini."""
     ocr_output = "前言\n| 姓名 | 年龄 |\n| --- | --- |\n| 张三 | 28 |\n尾注"
+    mock_genai = MagicMock()
     with patch("backend.core.ocr_client.ocr_image_bytes", AsyncMock(return_value=ocr_output)), \
-         patch("google.generativeai.configure"), \
-         patch("google.generativeai.GenerativeModel") as mock_gemini_cls:
+         patch.dict("sys.modules", {"google.generativeai": mock_genai}):
         md = await extract_tables_from_image(b"fake-page")
         assert "| 姓名 | 年龄 |" in md
-        mock_gemini_cls.assert_not_called()
+        mock_genai.GenerativeModel.assert_not_called()
 
 
 @pytest.mark.asyncio
 async def test_extract_tables_ocr_no_table_fallback(mock_settings):
     """OCR returns text with no table → Gemini fallback."""
+    mock_genai = MagicMock()
+    mock_model = MagicMock()
+    mock_resp = MagicMock()
+    mock_resp.text = "| 产品 | 价格 |\n| --- | --- |\n| 苹果 | 5元 |"
+    mock_model.generate_content = MagicMock(return_value=mock_resp)
+    mock_genai.GenerativeModel.return_value = mock_model
+
     with patch("backend.core.ocr_client.ocr_image_bytes", AsyncMock(return_value="just text")), \
-         patch("google.generativeai.configure"), \
-         patch("google.generativeai.GenerativeModel") as mock_gemini_cls:
-        mock_model = MagicMock()
-        mock_resp = MagicMock()
-        mock_resp.text = "| 产品 | 价格 |\n| --- | --- |\n| 苹果 | 5元 |"
-        mock_model.generate_content = MagicMock(return_value=mock_resp)
-        mock_gemini_cls.return_value = mock_model
+         patch.dict("sys.modules", {"google.generativeai": mock_genai}):
         md = await extract_tables_from_image(b"fake-page")
         assert "| 产品 | 价格 |" in md
+        mock_genai.configure.assert_called_once()
+        mock_genai.GenerativeModel.assert_called_once()
 
 
 @pytest.mark.asyncio

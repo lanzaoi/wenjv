@@ -8,17 +8,16 @@ def _mock_doc(content, id_str):
     return Document(page_content=content, metadata={"id": id_str})
 
 @pytest.fixture(autouse=True)
-def reset_settings():
-    settings.HYBRID_SEARCH_ENABLED = True
-    settings.HYBRID_KEYWORD_BACKEND = "fts5"
-    settings.STRUCTURED_RECALL_ENABLED = True
-    settings.HYBRID_RRF_K = 5
-    settings.HYBRID_RRF_WEIGHT_VECTOR = 1.0
-    settings.HYBRID_RRF_WEIGHT_KEYWORD = 1.0
-    settings.HYBRID_RRF_WEIGHT_STRUCTURED = 1.0
-    settings.RERANK_ENABLED = False
-    settings.MMR_ENABLED = False
-    yield
+def reset_settings(monkeypatch):
+    monkeypatch.setattr(settings, "HYBRID_SEARCH_ENABLED", True)
+    monkeypatch.setattr(settings, "HYBRID_KEYWORD_BACKEND", "fts5")
+    monkeypatch.setattr(settings, "STRUCTURED_RECALL_ENABLED", True)
+    monkeypatch.setattr(settings, "HYBRID_RRF_K", 5)
+    monkeypatch.setattr(settings, "HYBRID_RRF_WEIGHT_VECTOR", 1.0)
+    monkeypatch.setattr(settings, "HYBRID_RRF_WEIGHT_KEYWORD", 1.0)
+    monkeypatch.setattr(settings, "HYBRID_RRF_WEIGHT_STRUCTURED", 1.0)
+    monkeypatch.setattr(settings, "RERANK_ENABLED", False)
+    monkeypatch.setattr(settings, "MMR_ENABLED", False)
 
 @pytest.mark.asyncio
 async def test_search_structured_hit():
@@ -48,8 +47,8 @@ async def test_search_structured_hit():
         m_fetch.assert_called_once()
 
 @pytest.mark.asyncio
-async def test_search_structured_disabled():
-    settings.STRUCTURED_RECALL_ENABLED = False
+async def test_search_structured_disabled(monkeypatch):
+    monkeypatch.setattr(settings, "STRUCTURED_RECALL_ENABLED", False)
     
     with patch('backend.api.services.search.vector_store') as m_store, \
          patch('backend.core.fts5_utils.match_fts5', return_value=[]), \

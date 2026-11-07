@@ -1,7 +1,7 @@
 """PPTX helpers: text parse + optional image OCR enrichment (fail-open)."""
 from __future__ import annotations
 
-from typing import List, Tuple
+from typing import List
 
 from backend.parsers.base import ParsedChunk, extension_of
 

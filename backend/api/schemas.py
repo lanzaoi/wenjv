@@ -1,9 +1,23 @@
-# backend/auth/schemas.py
+# backend/api/schemas.py
+import json
 from typing import Optional, List, Dict
 from fastapi_users import schemas
 from datetime import datetime
-from pydantic import HttpUrl, Field, ConfigDict
+from pydantic import HttpUrl, Field, ConfigDict, field_validator
 from backend.config import settings
+
+
+def _parse_tags_value(v):
+    if isinstance(v, list):
+        return v
+    if isinstance(v, str):
+        try:
+            parsed = json.loads(v)
+            if isinstance(parsed, list):
+                return parsed
+        except Exception:
+            pass
+    return []
 
 
 class UserRead(schemas.BaseUser[int]):
@@ -23,11 +37,18 @@ class TokenPayload(schemas.BaseModel):
 
 
 class FileUploadResponse(schemas.BaseModel):
+    id: Optional[int] = None
     filename: str
     file_url: str
     status: str
     created_at: datetime
     updated_at: Optional[datetime] = None
+    tags: List[str] = Field(default_factory=list)
+
+    @field_validator("tags", mode="before")
+    @classmethod
+    def validate_tags(cls, v):
+        return _parse_tags_value(v)
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -52,7 +73,7 @@ class LinkBase(schemas.BaseModel):
 
 
 class LinkCreate(LinkBase):
-    pass
+    tags: Optional[List[str]] = None
 
 
 class LinkCrawl(LinkBase):
@@ -66,6 +87,12 @@ class LinkResponse(LinkBase):
     status: str
     created_at: datetime
     updated_at: Optional[datetime] = None
+    tags: List[str] = Field(default_factory=list)
+
+    @field_validator("tags", mode="before")
+    @classmethod
+    def validate_tags(cls, v):
+        return _parse_tags_value(v)
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -94,6 +121,7 @@ class DocumentSearchRequest(schemas.BaseModel):
     exclude_sources: Optional[List[str]] = None
     window_size: Optional[int] = 5
     source_type: Optional[str] = None
+    tags: Optional[List[str]] = None
 
 
 class DocumentMetadata(schemas.BaseModel):
@@ -107,6 +135,14 @@ class DocumentMetadata(schemas.BaseModel):
     file_id: Optional[str] = None
     filename: Optional[str] = None
     user_id: Optional[str] = None
+    tag_matched: Optional[bool] = None
+    tag_fallback: Optional[bool] = None
+    matched_tags_count: Optional[int] = None
+    image_path: Optional[str] = None
+    image_url: Optional[str] = None
+    has_image: Optional[bool] = None
+
+    model_config = ConfigDict(extra="ignore")
 
 
 class DocumentResult(schemas.BaseModel):
@@ -123,6 +159,7 @@ class DocumentSearchResponse(schemas.BaseModel):
 class NoteCreateRequest(schemas.BaseModel):
     content: str
     title: str
+    tags: Optional[List[str]] = None
 
 
 class NoteUpdateRequest(schemas.BaseModel):
@@ -152,7 +189,32 @@ class NoteResponse(schemas.BaseModel):
     title: str
     filename: str
     created_at: datetime
-    updated_at: datetime
+    updated_at: Optional[datetime] = None
+    tags: List[str] = Field(default_factory=list)
+
+    @field_validator("tags", mode="before")
+    @classmethod
+    def validate_tags(cls, v):
+        return _parse_tags_value(v)
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class TagUpdateRequest(schemas.BaseModel):
+    tags: List[str]
+
+
+class TagSummaryItem(schemas.BaseModel):
+    name: str
+    count: int
+
+
+class TagSummaryResponse(schemas.BaseModel):
+    tags: List[TagSummaryItem]
+
+
+class TagBackfillResponse(schemas.BaseModel):
+    enqueued_count: int
 
 
 class NoteList(schemas.BaseModel):

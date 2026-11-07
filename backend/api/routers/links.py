@@ -1,13 +1,9 @@
 # backend/api/routers/links.py
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select, desc, func, delete
+from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.api.dependencies import current_active_user
-from backend.worker.url_processor_recursive import recursive_url_processing_queue
-from backend.api.services.ingestion import queue_link
-from backend.vector_store.adapter import vector_db
-from backend.api.models import User, ProcessingStatus, Link
+from backend.api.models import User
 from backend.api.schemas import (
     LinkCreate,
     LinkResponse,
@@ -18,10 +14,17 @@ from backend.api.schemas import (
     LinksList,
     ResourceDeletedResponse,
 )
+from backend.api.services.links import (
+    create_link_service,
+    create_links_bulk_service,
+    list_links_service,
+    enqueue_recursive_crawl_service,
+    delete_link_service,
+)
 from backend.database import get_async_session
 
-vector_store = vector_db()
 link_router = APIRouter(tags=["links"])
+
 
 @link_router.post("/submit", response_model=LinkResponse, status_code=202)
 async def submit_link(
@@ -29,25 +32,13 @@ async def submit_link(
     user: User = Depends(current_active_user),
     session: AsyncSession = Depends(get_async_session)
 ):
-    db_link = Link(
-        url=str(link.url),
-        user_id=user.id,
-        status=ProcessingStatus.PENDING
-    )
-    session.add(db_link)
-    await session.commit()
-    await session.refresh(db_link)
-
-    # Durable job (survives restart)
-    await queue_link(
+    db_link = await create_link_service(
         session,
-        link_id=db_link.id,
+        user=user,
         url=str(link.url),
-        user_id=user.id,
-        user_email=user.email,
-        headers=dict(link.headers or {}),
+        headers=link.headers,
+        tags=link.tags,
     )
-
     return db_link
 
 
@@ -58,37 +49,13 @@ async def submit_links_bulk(
     user: User = Depends(current_active_user),
     session: AsyncSession = Depends(get_async_session)
 ):
-    # Process each URL
-    successful_links = []
-    failed_urls = []
-
-    for url in links_data.urls:
-        try:
-            # Create new link entry
-            db_link = Link(
-                url=str(url),
-                user_id=user.id,
-                status=ProcessingStatus.PENDING
-            )
-            session.add(db_link)
-            await session.commit()
-            await session.refresh(db_link)
-
-            # Durable job (survives restart)
-            await queue_link(
-                session,
-                link_id=db_link.id,
-                url=str(url),
-                user_id=user.id,
-                user_email=user.email,
-                headers=dict(links_data.headers or {}),
-            )
-
-            successful_links.append(db_link)
-        except Exception as e:
-            failed_urls.append(str(url))
-
-    return BulkLinkResponse(links_added=len(successful_links))
+    successful_count = await create_links_bulk_service(
+        session,
+        user=user,
+        urls=links_data.urls,
+        headers=links_data.headers,
+    )
+    return BulkLinkResponse(links_added=successful_count)
 
 
 # Links List endpoint
@@ -99,25 +66,12 @@ async def list_links(
     user: User = Depends(current_active_user),
     session: AsyncSession = Depends(get_async_session)
 ):
-    stmt = (
-        select(Link)
-        .where(Link.user_id == user.id)
-        .order_by(desc(Link.updated_at))
-        .offset(skip)
-        .limit(limit)
+    records, total_count = await list_links_service(
+        session,
+        user_id=user.id,
+        skip=skip,
+        limit=limit,
     )
-
-    result = await session.execute(stmt)
-    records = result.scalars().all()
-
-    count_stmt = (
-        select(func.count())
-        .select_from(Link)
-        .where(Link.user_id == user.id)
-    )
-
-    total_count = await session.execute(count_stmt)
-    total_count = total_count.scalar() or 0
 
     result = [
         LinkResponse(
@@ -130,7 +84,6 @@ async def list_links(
             updated_at=record.updated_at
         ) for record in records
     ]
-    # Return the file URL to the client
     return LinksList(
         links=result,
         total=total_count
@@ -144,10 +97,11 @@ async def recursive_crawl(
     user: User = Depends(current_active_user),
     session: AsyncSession = Depends(get_async_session)
 ):
-
-    url = links_data.url
-    await recursive_url_processing_queue.put((str(url), user, links_data.headers))
-
+    url = await enqueue_recursive_crawl_service(
+        user=user,
+        url=links_data.url,
+        headers=links_data.headers,
+    )
     return LinkCrawlResponse(status="submitted", url=url)
 
 
@@ -160,27 +114,5 @@ async def delete_link(
     user: User = Depends(current_active_user),
     session: AsyncSession = Depends(get_async_session)
 ):
-
-    result = await session.execute(
-        select(Link)
-        .where(Link.id == id, Link.user_id == user.id)
-    )
-    links = result.scalars().all()
-
-    if len(links) == 1:
-        link = links[0]
-        await session.execute(
-            delete(Link).where(Link.id == link.id)
-        )
-        vector_store.remove_link_documents(
-            link.id,
-            user.email
-        )
-        await session.commit()
-    else:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="File not found"
-        )
-
+    await delete_link_service(session, user=user, link_id=id)
     return ResourceDeletedResponse(status="deleted")

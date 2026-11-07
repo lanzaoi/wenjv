@@ -4,11 +4,13 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
+export PATH="$HOME/.local/bin:$ROOT/.venv/bin:$PATH"
+
 API_URL="${API_URL:-http://127.0.0.1:8000}"
 BACKEND_PORT="${BACKEND_PORT:-8000}"
 FRONTEND_PORT="${FRONTEND_PORT:-5173}"
 
-uvicorn backend.main:app --reload --host 127.0.0.1 --port "$BACKEND_PORT" --log-level info &
+python3 -m uvicorn backend.main:app --reload --host 0.0.0.0 --port "$BACKEND_PORT" --log-level info &
 FASTAPI_PID=$!
 
 cleanup() {
@@ -29,7 +31,7 @@ done
 export VITE_PROXY_TARGET="http://127.0.0.1:$BACKEND_PORT"
 (
   cd web
-  npm run dev -- --host 127.0.0.1 --port "$FRONTEND_PORT"
+  npm run dev -- --host 0.0.0.0 --port "$FRONTEND_PORT"
 ) &
 VITE_PID=$!
 

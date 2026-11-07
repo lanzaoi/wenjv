@@ -12,7 +12,6 @@ from langchain_community.document_loaders import RecursiveUrlLoader
 
 vector_store = vector_db()
 
-# import logging
 logger = get_logger()
 
 # Create a queue for background processing
@@ -36,12 +35,9 @@ async def process_recursive_url_queue():
             # Process the URL in a separate task to avoid blocking the queue
             asyncio.create_task(crawl_url(url, user, headers))
 
-            # Mark the queue task as done
-            # recursive_url_processing_queue.task_done()
-
         except Exception as e:
             logger.error(f"Error in URL processing queue: {str(e)}")
-            await asyncio.sleep(1)  # P
+            await asyncio.sleep(1)
 
 
 def bs4_extractor(html: str) -> str:
@@ -64,6 +60,7 @@ async def crawl_url(url, user, headers):
     # Acquire the semaphore to limit concurrency
     async with concurrency_limit:
         async with async_session_maker() as db:
+            current_link = None
             try:
                 async for doc in loader.alazy_load():
                     title = doc.metadata.get("title", "No title")
@@ -77,17 +74,29 @@ async def crawl_url(url, user, headers):
                     db.add(db_link)
                     await db.commit()
                     await db.refresh(db_link)
+                    current_link = db_link
+
                     await asyncio.to_thread(
                         vector_store.add_link_content_to_vector_store,
                         text, source, title, db_link.id, user.email
                     )
                     db_link.status = ProcessingStatus.FINISHED
                     await db.commit()
+                    current_link = None
 
                     logger.info(
                         f"Successfully processed URL {source} for user {user.email}")
-
-                recursive_url_processing_queue.task_done()
             except Exception as e:
                 logger.error(
                     f"Error crawling URL {url} for user {user.email}: {str(e)}")
+                if current_link is not None:
+                    try:
+                        current_link.status = ProcessingStatus.FAILED
+                        if hasattr(current_link, "error_message"):
+                            current_link.error_message = str(e)[:2000]
+                        await db.commit()
+                    except Exception as commit_err:
+                        logger.error(
+                            f"Failed to update link status to FAILED: {commit_err}")
+            finally:
+                recursive_url_processing_queue.task_done()

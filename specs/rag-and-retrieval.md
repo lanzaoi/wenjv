@@ -1,105 +1,118 @@
-# RAG 与检索规范（RAG & Retrieval）
+# RAG 与检索规范 (RAG & Retrieval)
 
-## 1. 流水线（唯一主路径）
+## 1. 入库与问答主链路
 
 ```text
-Source (note|file|link)
-  → Parser (backend/parsers)
-  → Chunk (load_and_chunk_document / splitter)
-  → Embed (Ollama embeddings)
-  → Vector upsert + SQL status=finished
-                ↓
-Question → (optional) history
-  → Embed(query) → Search + tenant filter
-  → Build prompt + citations
-  → LLM stream (Ollama via backend /chat)
+知识源 (笔记 / 文件 / 网页链接)
+  -> 解析器 (backend/parsers)
+  -> 文本切块 (load_and_chunk_document / RecursiveCharacterTextSplitter)
+  -> 向量生成 (云端接口 / 本地 Ollama Embeddings)
+  -> 向量写入 (LanceDB) 与 SQL 状态更新 (status=finished)
+                |
+用户提问 -> (可选) 上下文历史
+  -> Query 向量化 -> 语义检索 (硬注入 user_id 租户过滤)
+  -> 组装 Prompt 与参考引用依据 (Citations)
+  -> 模型流式输出 (/chat SSE)
 ```
 
-禁止另起一套「仅前端本地 RAG」作为默认生产路径。
+后端通过 `/chat` SSE 提供统一的 RAG 生成服务，前端不直接访问大模型服务。
 
-## 2. 解析（Parser）
+## 2. 文档解析器规范 (Parser)
 
-| 规则 | 说明 |
-|------|------|
-| 插件化 | 新格式 = 新 Parser + registry，不写巨型 if-else |
-| 失败显式 | 抽不到文本 → 失败状态 + error_message，禁止假成功 |
-| 元数据 | 尽量保留 page/slide 等，供引用定位 |
-| 当前支持 | text/md/json…、pdf、docx、**pptx** |
-| 明确未承诺 | 老 `.ppt`、OCR 扫描件、完美版面还原 |
+| 规范准则 | 具体实现要求 |
+|----------|--------------|
+| 插件化扩展 | 新增格式通过在 `backend/parsers/` 中实现独立 Parser 并注册至注册中心完成，不堆叠条件分支 |
+| 显式异常处理 | 文本提取为空或解析异常时，显式抛出错误并持久化 `FAILED` 状态与 `error_message`，杜绝静默假成功 |
+| 溯源元数据 | 解析过程中尽可能提取页码、幻灯片编号等定位信息，为引用溯源提供依据 |
+| 当前支持类型 | text / md / json / csv、pdf、docx、pptx、png / jpg / jpeg |
+| 边界与非目标 | 纯图片扫描件依赖可选 OCR 管道；不承诺老旧二进制 `.ppt` 文件的版面完全无损还原 |
 
-PPTX：允许「按幻灯片抽文本」的务实实现；增强（备注/表格）单独迭代，不在未完成时对外宣称「完整 PPT 支持」。
+针对 PPTX 格式，优先提取各幻灯片文本内容；备注和表格结构的深度抽取按需迭代。
 
-## 3. 切块（Chunking）
+## 3. 文本切块策略 (Chunking)
 
-- 默认：递归字符切块（size/overlap 见 `backend/config.py`）。  
-- 改参数必须考虑：**旧向量不自动迁移**，需重建或版本化 collection。  
-- 未来可按类型分配置（text/pdf/pptx 不同 size）；未配置前保持简单。
+- 默认采用基于字符长度与重叠窗口的递归切块（具体参数参见 `backend/config.py`）。
+- 调整切块参数需注意：历史切块向量不会自动迁移，必要时需全量重建向量索引。
+- 后续支持按不同文件类型配置专有切块尺寸，未配置前保持全局统一规则。
 
-## 4. Hybrid (合成方案)
+## 4. 混合检索设计 (Hybrid Search)
 
-- **默认关闭** (`HYBRID_SEARCH_ENABLED=false`)，未开启或未完成 backfill 时默认依赖纯向量或 LIKE。
-- **检索路线**：采用「向量主 + 词法辅」架构。
-- **L2 词法后端** (HYBRID_KEYWORD_BACKEND)：支持 `fts5` (默认) 或 `like`。不再包含 `fts5_then_like` 拼接策略。
-- **L3 融合重排**：采用等权 RRF (Weighted RRF)，默认权重 `w_v=1.0, w_k=1.0`（$k=5$）。进入 RRF 前，向量距离大于最大阈值的文档会被直接抛弃。
-- **注意**：FTS 不可用时会安全退回纯向量。混合检索开启时，由于 RRF 分数叠加，最终输出的 score 与纯 Lance 向量的 distance 量纲可能不同（RRF 输出越大越好）。
-- **同步要求**：使用 FTS5 需运行 `backend/worker/fts5_backfill.py` 脚本；增量入库会自动双写。
-- **效果门禁**：仅当专有名词召回率显著提升，且长尾语义不掉级时才建议在生产环境默认开启。
+- **默认状态**：代码中默认关闭 (`HYBRID_SEARCH_ENABLED=false`)。未开启或未执行词法索引补录时，默认依赖向量检索。
+- **检索架构**：采用「向量主、词法辅」的双路召回架构。
+- **词法引擎**：`HYBRID_KEYWORD_BACKEND` 支持 `fts5`（默认）或 `like`。
+- **加权倒数排名融合 (Weighted RRF)**：采用非对称权重，默认向量权重为 3.0，词法权重为 1.0（$k=5$）。在进入 RRF 前，超出距离阈值（默认 0.8）的切块会被预先过滤。
+- **降级与容错**：FTS5 服务异常或检索为空时，系统自动 Fail-open 降级为纯向量召回。
+- **索引维护**：存量数据可通过 `backend/worker/fts5_backfill.py` 补充 FTS5 索引，增量数据在 Worker 入库时自动完成双写。
+- **量纲说明**：开启混合检索时，融合输出的 RRF 分数与纯向量距离度量属于不同量纲（RRF 分数越高相关度越高）。
 
 ## 5. Embedding 与 Chat Provider
 
-- 推理后端目前支持配置化双路（Ollama 与 OpenAI 兼容 API），详见配置 `EMBEDDING_PROVIDER` 与 `CHAT_PROVIDER`。
-- 模型与 **维度** 必须一致（配置项成对修改，例如 bge-m3 必须配 1024）。  
-- 更换 embedding 模型或云提供商 ≈ **重建向量库**，不要混用旧的维度数据。
-- 调用可经薄封装或内置 HTTP 客户端拉流；业务编排不依赖 LangChain Agent 框架。
+- 推理后端支持配置化双路切换：云端兼容接口（OpenAI 规范，如 SiliconFlow + DeepSeek）与本地 Ollama 服务。
+- 向量模型与维度强制绑定：修改模型配置时必须同步调整 `EMBEDDINGS_DIMENSION`（例如云端 `bge-m3` 为 1024 维，本地 `all-minilm` 为 384 维）。
+- 更换向量模型必须重建向量库，不可跨维度混合使用同一数据目录。
+- 业务流直接使用内置异步 HTTP 客户端进行流式通信，不引入重量级 Agent 抽象框架。
 
-## 5. 检索
+## 6. 检索约束与租户隔离
 
-- 必须带 **租户过滤**（user_id / belongs_to；未来 workspace_id）。  
-- Top-K 由 `window_size` 等参数控制。  
-- include/exclude 源过滤是一等能力，勿删除。  
+- 检索全流程底层强制硬过滤租户作用域（注入 `user_id`，兼容 `belongs_to`）。
+- 召回切块数量由 `window_size` 参数控制。
+- 支持通过前缀指令限制检索知识源类型（笔记、文件或链接）。
 
-### 索引表述（对外与文档）
+### 向量索引与特征描述规范
 
-| 可说 | 不可说 |
-|------|--------|
-| 支持向量检索；Lance 侧可尽力创建 ANN（如 IVF_PQ）；小数据可能 flat | 「已采用并调优 HNSW」 |
-| metadata 标量索引加速过滤 | 「标量 BTREE = 语义索引」 |
+| 允许陈述 | 禁止虚假陈述 |
+|----------|--------------|
+| 支持稠密向量检索；LanceDB 达到阈值时可构建 ANN 索引（如 IVF_PQ），小数据量使用 Flat 线性扫描 | 宣称“已采用并深度调优分布式 HNSW” |
+| 关系数据库标量索引加速属性过滤 | 将标量 B-tree 索引宣称为语义索引 |
 
-## 6. Score 语义
+## 7. Score 语义规范
 
-- Lance 等返回值可能是 **距离（越小越近）**，不是百分比。  
-- API/UI 展示避免「匹配度 87%」除非实现了归一化并写明公式。  
-- 规划：可同时返回 `distance` 与可选 `similarity` 字段。
+- LanceDB 向量检索返回的原生分数为几何距离（欧氏或余弦距离，数值越小通常代表语义越相似）。
+- 前端与接口展示时注明为距离度量，避免未经归一化直接标注为百分比匹配度。
 
-## 7. 对话与「记忆」
+## 8. 对话与上下文管理
 
-| 类型 | 本项目做法 |
-|------|------------|
-| 知识记忆 | 向量知识库 + SQL 元数据 |
-| 多轮短上下文 | 请求体 `history`（窗口截断）+ FE `session_state.messages` |
-| Agent Memory | **不做**（非目标，见 `product-scope.md`） |
-| 会话持久化表 | 非当前必做；若做则命名为 conversation，不叫 memory 引擎 |
+| 维度 | 系统实现策略 |
+|------|--------------|
+| 知识库上下文 | 基于当前 Query 检索出的相关切块与元数据 |
+| 多轮会话上下文 | 客户端维护消息历史，请求时通过 `history` 参数传递并执行滑动窗口截断 |
+| 跨会话 Agent 长期记忆 | 明确不做（属于当前系统非目标） |
+| 会话持久化 | 会话记录由独立实体表管理，不包装为黑盒记忆引擎 |
 
-## 8. 质量与拒答
+## 9. 检索质量与拒答机制
 
-- 有 RAG 时优先 **带 citations**。  
-- 无命中：系统会触发硬拒答（默认 `RAG_REFUSE_ON_EMPTY=true`），直接返回无依据提示，避免大模型一本正经瞎编。
-- 评估：使用 `eval/` + 脚本对比改动前后（见 `.hermes/plans` 中 G0/G1）。
+- 问答输出优先提供引用标记 (citations)。
+- **空命中拒答机制 (Refusal)**：默认启用 (`RAG_REFUSE_ON_EMPTY=true`)。在启用 RAG 模式下，若检索未命中任何符合阈值的依据切块，后端直接返回无依据提示事件并终结流，不调用大模型生成文本，抑制无依据幻觉生成。
 
-### 自动化评估与架构门禁（v1.3 规范）
-为杜绝“凭感觉调参”，本项目在 `eval/` 目录构建了基于 MS MARCO 的标准检索评估流水线与消融实验矩阵：
-1. **如何跑评估**：
-   - 准备数据：通过 `python eval/sample_msmarco.py` 采样评测集，通过 `python eval/ingest_msmarco.py` 写入向量库。
-   - 运行实验：使用 `python eval/run_eval.py` 进行单次评测，或使用 `python eval/run_matrix.py` 自动批量运行 4 组消融矩阵（`default`、`hybrid_off`、`rerank_on`、`mmr_off`）。
-   - 查看报告：评估结果自动生成于 `eval/ab_matrix_1.3.csv` 与 `eval/ab_matrix_1.3.md`，重点观测 **MRR@10**、**Recall@5**、**Recall@10** 及耗时指标。
-2. **默认配置与门禁表述**：
-   - 决策依据：实验矩阵数据结论统一归档于 [`eval/gate_decision.md`](../eval/gate_decision.md)。
-   - 门禁纪律：**严禁任何自动化脚本或开发人员私自修改代码默认开关**，参数变更必须经由人审核签署。当前推荐默认配置为：
-     - **Hybrid 混合检索**：默认推荐开启（配合 FTS5 弥补专用名词与准确代码召回）。
-     - **MMR 多样性重排**：默认推荐开启（有效剔除高相似度冗余块，提升信息熵）。
-     - **Rerank 二次重排**：默认推荐关闭（推理耗时显著升高，且易增加不确定的拒答率，仅限高算力场景选配）。
+### 自动化评估与配置门禁 (Gate Decisions & Benchmarks)
 
-## 9. 使用频率加权
+系统构建了**分层基准评测体系**，严格区分底层算法消融与业务场景验证：
+1. **算法底层单点消融（MS MARCO M-Small）**：
+   - **定位**：用于早期验证 LanceDB 单机向量检索吞吐、FTS5 BM25 词法融合算法内核、以及重排算法的单点消融。
+   - **门禁结论与默认配置约束**：例如实验证明在短查询下开启 MMR 会导致 MRR@10 下降约 41%，因此确立了默认关闭 MMR 的工程门禁。系统代码中的默认配置变更必须依据实验数据人工审核确认。
+2. **多模态与长文档真实业务基准（Open RAGBench 55-Query & 中文多格式）**：
+   - **定位**：与实际知识库场景（长篇 PDF、扫描件排版、多级目录、图表穿插）深度对齐。
+   - **核心指标**：涵盖 51 篇真实 ArXiv 科学文献全模态 55 题评测，实测 Gold Doc Recall@5 达 100%，端到端问答及格率 94.5%，诚实拒答率 3.6%，确保可证伪与场景对齐。
 
-- **默认不做**复杂热度排序（见 `product-scope.md`）。  
-- 若将来加：仅轻量 boost + 防马太效应，且排在 hybrid/治理之后。
+## 10. 使用频率加权策略
+
+- 当前阶段不引入复杂热度衰减与频次排序算法。
+- 后续若引入频次调整，仅作为轻量辅助加权项，并置于混合检索与数据清洗阶段之后。
+
+## 11. 内部标签分类与双层召回补偿机制 (Tag Classification & Recall Compensation)
+
+### 架构设计准则
+- **SQLite 单一事实来源**：标签数据集中存储于关系数据库 `file_uploads.tags`、`notes.tags`、`links.tags`（JSON 字符串数组），保持 LanceDB 向量分块元数据轻量稳定。标签修改为 $O(1)$ 级操作，无需触发耗时的向量重写或重新 Embedding。
+- **异步自动打标引擎 (Auto-tagger)**：
+  - 由后台持久化任务 `durable_jobs` 在文本切块向量入库完成后触发。
+  - 采用「首尾采样（不超过 1500 字）+ 规则先行（YAML Frontmatter / `#hashtag`）+ 现有 Top 50 词表注入聚拢 + LLM JSON 提取」。
+  - 具备 **Fail-open 兜底保障**：LLM 接口超时或解析异常绝不阻塞文档入库状态（标记完成并退回规则标签）。
+- **双层“过滤后召回补偿”架构**：
+  1. **Layer 1: 前置投影与梯度加权**：
+     - 查询侧支持 `#tag` 语法自动提取或显式 `tags` 参数传递。
+     - 依据用户标签映射到 SQLite 资源清单，并将源范围下推为 LanceDB `where(..., prefilter=True)` 过滤条件与 FTS5 条件，防止后置过滤导致召回饥饿。
+     - RRF 阶段结合切块所属资源的标签重合度进行动态梯度加权（提高强相关标签切块排序）。
+  2. **Layer 2: 软回退补足与明确溯源**：
+     - 若严格标签过滤后召回数量不足预期的 `window_size`，系统自动发起无标签约束的补充混合检索。
+     - 去重后补足至 `window_size` 槽位，并标注 `tag_matched: false, tag_fallback: true`。
+     - 客户端溯源面板明确区分展示 `[标签命中]` (高亮) 与 `[全库补充]` (中性)，兼顾精准收敛与上下文完整度。

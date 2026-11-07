@@ -3,7 +3,7 @@ from fastapi.testclient import TestClient
 from unittest.mock import patch, AsyncMock
 from backend.main import app
 from backend.core.image_ingest import ImageExtractionError
-from backend.api.dependencies import current_active_user
+from backend.api.dependencies import current_active_user, current_optional_user
 from backend.api.models import User
 
 client = TestClient(app)
@@ -108,7 +108,8 @@ async def test_search_by_image_extract_fail():
     app.dependency_overrides[current_active_user] = override_current_user
     try:
         with patch("backend.core.image_query_gate.validate_image_query_upload", side_effect=_ok_gate), \
-             patch("backend.core.image_ingest.extract_text_from_image_bytes", new_callable=AsyncMock) as mock_extract:
+             patch("backend.core.image_ingest.extract_text_from_image_bytes", new_callable=AsyncMock) as mock_extract, \
+             patch("backend.vector_store.lance_db.fetch_visual_documents", return_value=[]):
             mock_extract.side_effect = ImageExtractionError("neither OCR nor Gemini yielded text")
 
             with open(__file__, "rb") as f:
@@ -116,6 +117,60 @@ async def test_search_by_image_extract_fail():
 
             assert res.status_code == 400
             assert "neither OCR" in res.json()["detail"]
+    finally:
+        app.dependency_overrides = {}
+
+
+@pytest.mark.asyncio
+async def test_search_by_image_no_text_visual_success():
+    """Verify that pure visual images without text gracefully succeed via Track B visual search."""
+    from langchain_core.documents import Document
+    app.dependency_overrides[current_active_user] = override_current_user
+    try:
+        mock_doc = Document(
+            page_content="Figure 3: Thermal conductivity vs temperature",
+            metadata={
+                "id": "chunk_v1",
+                "image_path": "/home/lanzao/.config/wenjv/uploads/mm_assets/test/img-0.jpg",
+                "filename": "paper.pdf",
+            }
+        )
+        with patch("backend.core.image_query_gate.validate_image_query_upload", side_effect=_ok_gate), \
+             patch("backend.core.image_ingest.extract_text_from_image_bytes", new_callable=AsyncMock) as mock_extract, \
+             patch("backend.vector_store.lance_db.fetch_visual_documents", return_value=[(mock_doc, 0.85, "paper.pdf")]):
+            mock_extract.side_effect = ImageExtractionError("neither OCR nor Gemini yielded text")
+
+            with open(__file__, "rb") as f:
+                res = client.post("/documents/search/by-image", files={"file": ("test.png", f, "image/png")})
+
+            assert res.status_code == 200
+            data = res.json()
+            assert data["count"] == 1
+            doc = data["documents"][0]
+            assert doc["metadata"]["has_image"] is True
+            assert "/api/documents/assets/image?path=" in doc["metadata"]["image_url"]
+    finally:
+        app.dependency_overrides = {}
+
+
+@pytest.mark.asyncio
+async def test_document_asset_image_security():
+    """Verify that path traversal is blocked with 403 and valid images can be served."""
+    # 0. Unauthorized check
+    app.dependency_overrides = {}
+    res = client.get("/documents/assets/image?path=/etc/passwd")
+    assert res.status_code == 401
+
+    app.dependency_overrides[current_optional_user] = override_current_user
+    try:
+        # 1. Path traversal attempt
+        res = client.get("/documents/assets/image?path=/etc/passwd")
+        assert res.status_code == 403
+        assert "outside upload directory" in res.json()["detail"]
+
+        # 2. Missing parameter
+        res = client.get("/documents/assets/image")
+        assert res.status_code == 400
     finally:
         app.dependency_overrides = {}
 

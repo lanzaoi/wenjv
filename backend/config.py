@@ -108,7 +108,7 @@ class Settings(BaseSettings):
 
         from backend.core.image_ingest_gate import image_ingest_allowed
         allowed, _ = image_ingest_allowed(self)
-        if allowed:
+        if allowed or getattr(self, "OCR_MODE", "off") != "off":
             for ext in ["png", "jpg", "jpeg"]:
                 if ext not in self.ALLOWED_UPLOAD_EXTENSIONS:
                     self.ALLOWED_UPLOAD_EXTENSIONS.append(ext)
@@ -146,28 +146,45 @@ class Settings(BaseSettings):
     CHAT_API_BASE: str = ""
     CHAT_API_KEY: str = ""
     CHAT_MODEL: str = ""
+    DEFAULT_CHAT_MODEL: str = "mistral:7b-instruct-q4_0"
 
     # RAG Refusal settings
     RAG_REFUSE_ON_EMPTY: bool = True
+
+    # Auto-tagging & Classification settings
+    AUTO_TAGGING_ENABLED: bool = True
+    AUTO_TAGGING_MAX_TAGS: int = 5
+    AUTO_TAGGING_SAMPLE_CHARS: int = 1500
     
     # Hybrid Search Settings (Y2+)
     HYBRID_SEARCH_ENABLED: bool = False
     HYBRID_KEYWORD_BACKEND: str = "fts5"  # fts5 | like
     HYBRID_VECTOR_MAX_DISTANCE: float = 0.8
     HYBRID_RRF_K: int = 5
-    HYBRID_RRF_WEIGHT_VECTOR: float = 3.0
-    HYBRID_RRF_WEIGHT_KEYWORD: float = 1.0
+    HYBRID_RRF_WEIGHT_VECTOR: float = 1.0
+    HYBRID_RRF_WEIGHT_KEYWORD: float = 0.8
 
     # ---- 1.2 RAG Depth ----
 
     # Rerank (cross-encoder)
-    RERANK_ENABLED: bool = False
-    RERANK_PROVIDER: str = "siliconflow"
+    RERANK_ENABLED: bool = True
+    RERANK_PROVIDER: str = "local_onnx"
+    LOCAL_RERANK_MODEL_DIR: str = "models/bge_reranker_v2_m3"
     RERANK_API_BASE: str = ""
     RERANK_API_KEY: str = ""
     RERANK_MODEL: str = "BAAI/bge-reranker-v2-m3"
-    RERANK_CANDIDATES: int = 20
+    RERANK_CANDIDATES: int = 15
     RERANK_TIMEOUT_SECONDS: int = 8
+    RERANK_REL_GAP_THRESHOLD: float = 0.40
+    RERANK_MIN_KEEP: int = 2
+    CHUNK_DETERMINISTIC_ID_ENABLED: bool = True
+    BI_TEXT_INDEXING_ENABLED: bool = True
+    STRUCTURE_AWARE_CHUNKING_ENABLED: bool = True
+    MAX_ATOMIC_BLOCK_SIZE: int = 1200
+    CONTEXT_DEOVERLAP_MERGE_ENABLED: bool = True
+    LOST_IN_THE_MIDDLE_ENABLED: bool = True
+    INGESTION_MICRO_BATCH_SIZE: int = 32
+    INGESTION_MICRO_BATCH_TIMEOUT_MS: int = 50
 
     # MMR — gate 1.4/1.5: default OFF (λ=0.7 optional when enabled)
     MMR_ENABLED: bool = False
@@ -200,7 +217,7 @@ class Settings(BaseSettings):
     # Query Understanding Layer (1.4)
     QUERY_CLASSIFIER_ENABLED: bool = False
     QUERY_CLASSIFIER_SHORT_BOOST: float = 2.0
-    QUERY_CLASSIFIER_SHORT_KEYWORD_BOOST: float = 2.0
+    QUERY_CLASSIFIER_SHORT_KEYWORD_BOOST: float = 1.5
     QUERY_CLASSIFIER_LONG_BOOST: float = 2.0
     QUERY_CLASSIFIER_LONG_QUESTION_BOOST: float = 2.0
     QUERY_CLASSIFIER_MAX_WEIGHT: float = 5.0
@@ -231,8 +248,14 @@ class Settings(BaseSettings):
     CHUNK_EXPAND_WINDOW: int = 2
     CHUNK_RETRIEVAL_SIZE: int = 256
 
-    # Multimodal (1.5)
+    # Multimodal (1.5 & L2/L3)
     MULTIMODAL_ENABLED: bool = False
+    VISUAL_SEARCH_ENABLED: bool = True
+    VISUAL_EMBEDDING_PROVIDER: str = "siglip2_onnx"
+    VISUAL_EMBEDDING_DIMENSION: int = 768
+    SIGLIP2_ONNX_MODEL_DIR: str = "models/siglip2_onnx"
+    VISUAL_VECTOR_STORE_COLLECTION_NAME: str = "visual_store"
+    HYBRID_RRF_WEIGHT_VISUAL: float = 0.5
     # Prefer GEMINI_API_KEY; also accept GOOGLE_API_KEY from env/.env
     GEMINI_API_KEY: str = ""
     GEMINI_VL_MODEL: str = "gemini-2.0-flash"
@@ -280,13 +303,14 @@ class Settings(BaseSettings):
         "Accept-Language": "en-US,en;q=0.5"
     }
 
-    LOGGER_NAME: str = "knowledge_base_backend"
+    LOGGER_NAME: str = "wenjv"
     LOG_FORMAT: str = "<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>"
     LOG_LEVEL: str = "INFO"
 
     model_config = SettingsConfigDict(
         env_file=get_env_file_path(),
         env_file_encoding='utf-8',
+        extra='ignore',
     )
 
     @field_validator("DEFAULT_HEADERS", mode="before")

@@ -2,7 +2,8 @@ import { defineStore } from 'pinia'
 import { login as apiLogin, register as apiRegister, validateToken } from '../api/client'
 import { useChatStore } from './chat'
 
-const STORAGE_KEY = 'kb_auth'
+const STORAGE_KEY = 'wenjv_auth_token'
+const LEGACY_STORAGE_KEYS = ['wenjv_auth', 'kb_auth']
 
 export const useAuthStore = defineStore('auth', {
   state: () => ({
@@ -16,7 +17,13 @@ export const useAuthStore = defineStore('auth', {
   actions: {
     hydrate() {
       try {
-        const raw = localStorage.getItem(STORAGE_KEY)
+        let raw = localStorage.getItem(STORAGE_KEY)
+        if (!raw) {
+          for (const k of LEGACY_STORAGE_KEYS) {
+            raw = localStorage.getItem(k)
+            if (raw) break
+          }
+        }
         if (!raw) {
           this.ready = true
           return
@@ -38,6 +45,9 @@ export const useAuthStore = defineStore('auth', {
         )
       } else {
         localStorage.removeItem(STORAGE_KEY)
+        for (const k of LEGACY_STORAGE_KEYS) {
+          localStorage.removeItem(k)
+        }
       }
     },
     async ensureValid() {

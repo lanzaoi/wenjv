@@ -3,7 +3,8 @@ import os
 from datetime import datetime
 from typing import AsyncGenerator
 
-from sqlalchemy import create_engine, Column, String, Text, Integer, LargeBinary, DateTime, Float, Boolean
+from sqlalchemy import create_engine, Column, String, Text, Integer, LargeBinary, DateTime, Float, Boolean, event
+from sqlalchemy.engine import Engine
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 from sqlalchemy.sql import func
@@ -69,15 +70,34 @@ class DocEmbeddingTable(Base):
     chunk_count = Column(Integer, nullable=False, default=1)
     updated_at = Column(DateTime, default=datetime.utcnow)
 
+@event.listens_for(Engine, "connect")
+def _set_sqlite_pragmas(dbapi_connection, connection_record):
+    """Enable WAL mode, NORMAL synchronous, and busy timeout for concurrent SQLite throughput."""
+    if hasattr(dbapi_connection, "cursor"):
+        cursor = dbapi_connection.cursor()
+        try:
+            cursor.execute("PRAGMA journal_mode=WAL;")
+            cursor.execute("PRAGMA synchronous=NORMAL;")
+            cursor.execute("PRAGMA busy_timeout=5000;")
+        except Exception:
+            pass
+        finally:
+            cursor.close()
+
 # Create synchronous engine for initial setup
 sync_engine = create_engine(
     settings.DATABASE_URL.replace("+aiosqlite", ""),
     connect_args={"check_same_thread": False}
 )
 
+_cache_engine = None
+
 def get_cache_engine():
-    db_path = getattr(settings, "CACHE_DIR", os.path.join(settings.BASE_DIR, "cache.db"))
-    return create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
+    global _cache_engine
+    if _cache_engine is None:
+        db_path = getattr(settings, "CACHE_DIR", os.path.join(settings.BASE_DIR, "cache.db"))
+        _cache_engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
+    return _cache_engine
 
 # Create async engine for FastAPI
 engine = create_async_engine(
@@ -96,9 +116,9 @@ def _ensure_sqlite_columns(connection):
     create_all() does not add new columns to already-created tables.
     """
     upgrades = {
-        "file_uploads": [("error_message", "TEXT")],
-        "notes": [("error_message", "TEXT")],
-        "links": [("error_message", "TEXT")],
+        "file_uploads": [("error_message", "TEXT"), ("tags", "TEXT DEFAULT '[]'")],
+        "notes": [("error_message", "TEXT"), ("tags", "TEXT DEFAULT '[]'")],
+        "links": [("error_message", "TEXT"), ("tags", "TEXT DEFAULT '[]'")],
     }
     for table, columns in upgrades.items():
         existing = {

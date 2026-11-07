@@ -2,7 +2,6 @@ import logging
 from typing import Optional
 from backend.config import settings
 from backend.core.ocr_client import ocr_image_bytes
-from backend.core.multimodal import generate_caption
 
 logger = logging.getLogger(__name__)
 
@@ -33,10 +32,7 @@ async def extract_text_from_image_bytes(data: bytes, filename: Optional[str] = N
     caption_text = ""
     if getattr(settings, "IMAGE_CAPTION_FALLBACK_ENABLED", True):
         try:
-            # We bypass the dual OCR attempt in generate_caption by calling the inner gemini_caption 
-            # if we wanted, or we just call generate_caption which will re-try OCR if multimodal forces it,
-            # but since we already failed OCR, it will likely fail again and go to Gemini.
-            # To be efficient and strict, we can just call `_gemini_caption` directly.
+            # Directly invoke _gemini_caption since OCR has already been attempted above.
             from backend.core.multimodal import _gemini_caption
             raw_caption = await _gemini_caption(data, settings, settings.GEMINI_VL_MODEL)
             if raw_caption and raw_caption.strip():

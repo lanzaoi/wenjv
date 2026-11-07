@@ -8,12 +8,11 @@ def _mock_doc(content, id_str):
     return Document(page_content=content, metadata={"id": id_str})
 
 @pytest.fixture(autouse=True)
-def reset_settings():
-    settings.HYBRID_SEARCH_ENABLED = False
-    settings.MMR_ENABLED = False
-    settings.RERANK_ENABLED = True
-    settings.RERANK_CANDIDATES = 10
-    yield
+def reset_settings(monkeypatch):
+    monkeypatch.setattr(settings, "HYBRID_SEARCH_ENABLED", False)
+    monkeypatch.setattr(settings, "MMR_ENABLED", False)
+    monkeypatch.setattr(settings, "RERANK_ENABLED", True)
+    monkeypatch.setattr(settings, "RERANK_CANDIDATES", 10)
 
 @pytest.mark.asyncio
 async def test_search_rerank_enabled():
@@ -38,8 +37,8 @@ async def test_search_rerank_enabled():
         assert results[1][0].metadata["id"] == "v1"
 
 @pytest.mark.asyncio
-async def test_search_rerank_disabled():
-    settings.RERANK_ENABLED = False
+async def test_search_rerank_disabled(monkeypatch):
+    monkeypatch.setattr(settings, "RERANK_ENABLED", False)
     
     with patch('backend.api.services.search.vector_store') as m_store, \
          patch('backend.core.rerank_client.rerank', new_callable=AsyncMock) as m_rerank:

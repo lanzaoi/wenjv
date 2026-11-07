@@ -1,6 +1,6 @@
 """Product data-dir resolution for wenjv with legacy inquisitive fallback.
 
-Stdlib-only so start/kb_launcher can import the same logic as backend.config.
+Stdlib-only so start/wenjv_launcher can import the same logic as backend.config.
 
 Rules (A+):
 - Prefer ~/.config/wenjv when it has real KB markers (db / env / lance / uploads…).
@@ -39,8 +39,8 @@ _DATA_DIRS = (
 )
 
 
-def dir_has_kb_data(dir_path: PathLike) -> bool:
-    """True if path is a directory with at least one real KB marker."""
+def dir_has_wenjv_data(dir_path: PathLike) -> bool:
+    """True if path is a directory with at least one real KB / wenjv marker."""
     p = Path(dir_path)
     if not p.is_dir():
         return False
@@ -71,15 +71,19 @@ def dir_has_kb_data(dir_path: PathLike) -> bool:
     return False
 
 
+# Backward compatibility alias
+dir_has_kb_data = dir_has_wenjv_data
+
+
 def resolve_base_dir(home: Optional[str] = None) -> str:
     """Pick config/data root: wenjv if populated, else legacy, else wenjv (fresh)."""
     home_dir = home if home is not None else os.path.expanduser("~")
     primary = os.path.join(home_dir, ".config", PRODUCT_CONFIG_NAME)
     fallback = os.path.join(home_dir, ".config", LEGACY_CONFIG_NAME)
 
-    if dir_has_kb_data(primary):
+    if dir_has_wenjv_data(primary):
         return primary
-    if dir_has_kb_data(fallback):
+    if dir_has_wenjv_data(fallback):
         return fallback
     return primary
 

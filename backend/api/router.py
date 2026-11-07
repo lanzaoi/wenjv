@@ -1,6 +1,5 @@
 # backend/api/router.py — auth routes only
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.api.dependencies import (
@@ -16,6 +15,7 @@ from backend.api.schemas import (
     UserUpdate,
 )
 from backend.api.service import validate_jwt_token
+from backend.api.services.users import get_user_by_username_service
 from backend.database import get_async_session
 
 router = APIRouter()
@@ -45,16 +45,14 @@ async def validate_token(payload: TokenPayload):
 
 @router.get("/users/{username}", response_model=UserRead, tags=["users"])
 async def get_user_by_username(
-    username: User = Depends(current_active_user),
+    username: str,
+    user: User = Depends(current_active_user),
     session: AsyncSession = Depends(get_async_session),
 ):
     """Get a user by username"""
-    query = select(User).where(User.username == username)
-    result = await session.execute(query)
-    user = result.scalars().first()
+    db_user = await get_user_by_username_service(session, username=username)
 
-    if not user:
+    if not db_user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    return user
-
+    return db_user

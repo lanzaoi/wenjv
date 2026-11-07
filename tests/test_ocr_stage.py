@@ -6,9 +6,9 @@ from backend.config import settings
 from backend.worker.durable_jobs import _execute_document
 
 @pytest.mark.asyncio
-async def test_ocr_stage_empty_pdf_success():
-    settings.OCR_MODE = "auto"
-    settings.OCR_MIN_CHARS = 40
+async def test_ocr_stage_empty_pdf_success(monkeypatch):
+    monkeypatch.setattr(settings, "OCR_MODE", "auto")
+    monkeypatch.setattr(settings, "OCR_MIN_CHARS", 40)
     
     m_session = AsyncMock()
     m_job = MagicMock()
@@ -58,8 +58,8 @@ async def test_ocr_stage_empty_pdf_success():
             os.remove(temp_file)
 
 @pytest.mark.asyncio
-async def test_ocr_stage_off_mode_fails():
-    settings.OCR_MODE = "off"
+async def test_ocr_stage_off_mode_fails(monkeypatch):
+    monkeypatch.setattr(settings, "OCR_MODE", "off")
     
     m_session = AsyncMock()
     m_job = MagicMock()

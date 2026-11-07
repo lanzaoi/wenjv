@@ -90,25 +90,51 @@ export async function listLinks(token, skip = 0, limit = 50) {
   return apiJson(`/links/?skip=${skip}&limit=${limit}`, { token })
 }
 
-export async function uploadFile(token, file) {
+export async function uploadFile(token, file, tags = null) {
   const fd = new FormData()
   fd.append('file', file, file.name)
+  if (tags && tags.length > 0) {
+    fd.append('tags', Array.isArray(tags) ? JSON.stringify(tags) : String(tags))
+  }
   return apiJson('/file/upload', { method: 'POST', token, body: fd })
 }
 
-export async function createNote(token, title, content) {
+export async function createNote(token, title, content, tags = null) {
+  const body = { title, content }
+  if (tags && tags.length > 0) body.tags = tags
   return apiJson('/file/note', {
     method: 'POST',
     token,
-    body: { title, content },
+    body,
   })
 }
 
-export async function submitLink(token, url, headers = {}) {
+export async function submitLink(token, url, headers = {}, tags = null) {
+  const body = { url, headers }
+  if (tags && tags.length > 0) body.tags = tags
   return apiJson('/links/submit', {
     method: 'POST',
     token,
-    body: { url, headers },
+    body,
+  })
+}
+
+export async function getTags(token, limit = 50) {
+  return apiJson(`/documents/tags?limit=${limit}`, { token })
+}
+
+export async function updateResourceTags(token, sourceType, resourceId, tags) {
+  return apiJson(`/documents/${sourceType}/${resourceId}/tags`, {
+    method: 'PUT',
+    token,
+    body: { tags },
+  })
+}
+
+export async function backfillTags(token) {
+  return apiJson('/documents/tags/backfill', {
+    method: 'POST',
+    token,
   })
 }
 
@@ -124,15 +150,17 @@ export async function deleteLink(token, linkId) {
   return apiJson(`/links/${linkId}`, { method: 'DELETE', token })
 }
 
-export async function searchDocuments(token, prompt, windowSize = 5, sourceType = null) {
+export async function searchDocuments(token, prompt, windowSize = 5, sourceType = null, tags = null) {
+  const body = {
+    prompt,
+    window_size: windowSize,
+    source_type: sourceType || null,
+  }
+  if (tags && tags.length > 0) body.tags = tags
   return apiJson('/documents/search', {
     method: 'POST',
     token,
-    body: {
-      prompt,
-      window_size: windowSize,
-      source_type: sourceType || null,
-    },
+    body,
   })
 }
 

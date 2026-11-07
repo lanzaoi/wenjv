@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "wenjv"
 version = "0.1.0"
-description = "wenjv（问据）：自托管个人知识库 — 笔记/文件/链接 CRUD、异步向量化与 RAG 流式对话"
+description = "wenjv（问据）：自托管个人知识库 - 笔记/文件/链接 CRUD、异步向量化与 RAG 流式对话"
 readme = "README.md"
 requires-python = ">=3.11"
 license = {text = "GNU Affero General Public License v3 (AGPLv3)"}
@@ -24,10 +24,6 @@ wenjv = "start.launcher:main"
 wenjv-start = "start.launcher:main"
 wenjv-start-backend = "backend.main:start_server"
 wenjv-start-ui = "start.launcher:start_frontend_separately"
-inquisitive-start-backend = "backend.main:start_server"
-inquisitive-start-ui = "start.launcher:start_frontend_separately"
-inquisitive-start = "start.launcher:main"
-inquisitive = "start.launcher:main"
 
 [tool.setuptools.dynamic]
 dependencies = {file = ["requirements.txt"]}

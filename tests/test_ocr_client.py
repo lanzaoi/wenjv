@@ -4,15 +4,14 @@ from backend.config import settings
 from backend.core.ocr_client import ocr_image_bytes, OCRError, OCRTimeoutError, OCRConfigError
 
 @pytest.fixture(autouse=True)
-def reset_settings():
-    settings.OCR_MODE = "on"
-    settings.OCR_AISTUDIO_ACCESS_TOKEN = "test-token"
-    settings.OCR_TIMEOUT_SECONDS = 2
-    yield
+def reset_settings(monkeypatch):
+    monkeypatch.setattr(settings, "OCR_MODE", "on")
+    monkeypatch.setattr(settings, "OCR_AISTUDIO_ACCESS_TOKEN", "test-token")
+    monkeypatch.setattr(settings, "OCR_TIMEOUT_SECONDS", 2)
 
 @pytest.mark.asyncio
-async def test_ocr_missing_token():
-    settings.OCR_AISTUDIO_ACCESS_TOKEN = ""
+async def test_ocr_missing_token(monkeypatch):
+    monkeypatch.setattr(settings, "OCR_AISTUDIO_ACCESS_TOKEN", "")
     with pytest.raises(OCRConfigError, match="OCR_AISTUDIO_ACCESS_TOKEN is not set"):
         await ocr_image_bytes(b"test")
 
@@ -45,8 +44,8 @@ async def test_ocr_success():
         assert m_get.call_count == 2
         
 @pytest.mark.asyncio
-async def test_ocr_timeout():
-    settings.OCR_TIMEOUT_SECONDS = 0.1
+async def test_ocr_timeout(monkeypatch):
+    monkeypatch.setattr(settings, "OCR_TIMEOUT_SECONDS", 0.1)
     
     with patch('backend.core.ocr_client.httpx.AsyncClient.post') as m_post, \
          patch('backend.core.ocr_client.httpx.AsyncClient.get') as m_get, \

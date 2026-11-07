@@ -7,9 +7,9 @@ from backend.worker.durable_jobs import _execute_document, ProcessingStatus
 from backend.api.models import JobStatus
 
 @pytest.mark.asyncio
-async def test_execute_document_auto_ocr_skipped():
-    settings.OCR_MODE = "auto"
-    settings.OCR_MIN_CHARS = 40
+async def test_execute_document_auto_ocr_skipped(monkeypatch):
+    monkeypatch.setattr(settings, "OCR_MODE", "auto")
+    monkeypatch.setattr(settings, "OCR_MIN_CHARS", 40)
     
     m_session = AsyncMock()
     m_job = MagicMock()
@@ -42,9 +42,9 @@ async def test_execute_document_auto_ocr_skipped():
         )
 
 @pytest.mark.asyncio
-async def test_execute_document_auto_ocr_triggered():
-    settings.OCR_MODE = "auto"
-    settings.OCR_MIN_CHARS = 40
+async def test_execute_document_auto_ocr_triggered(monkeypatch):
+    monkeypatch.setattr(settings, "OCR_MODE", "auto")
+    monkeypatch.setattr(settings, "OCR_MIN_CHARS", 40)
     
     m_session = AsyncMock()
     m_job = MagicMock()
@@ -85,8 +85,8 @@ async def test_execute_document_auto_ocr_triggered():
 
 
 @pytest.mark.asyncio
-async def test_execute_document_ocr_failed():
-    settings.OCR_MODE = "always"
+async def test_execute_document_ocr_failed(monkeypatch):
+    monkeypatch.setattr(settings, "OCR_MODE", "always")
     
     m_session = AsyncMock()
     m_job = MagicMock()
@@ -107,7 +107,8 @@ async def test_execute_document_ocr_failed():
          patch('backend.core.pdf_render.render_pdf_pages', side_effect=Exception("Timeout!!")) as m_render, \
          patch('backend.worker.durable_jobs._mark_resource_failed', new_callable=AsyncMock) as m_fail:
          
-        await _execute_document(m_session, m_job, payload)
+        with pytest.raises(RuntimeError, match="OCR extraction failed"):
+            await _execute_document(m_session, m_job, payload)
         
         m_render.assert_called_once()
         m_fail.assert_called_once()

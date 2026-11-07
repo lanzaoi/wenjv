@@ -1,59 +1,57 @@
-# 编码与工程约定（Coding Conventions）
+# 编码与工程约定 (Coding Conventions)
 
-## 1. 语言与运行
+## 1. 语言与运行时规范
 
-- Python **3.11+**  
-- 格式：与现有文件保持一致（不强制全库 reformat 大爆炸）。  
-- 新文件：类型提示适度；公开 service 函数优先注解。
+- 运行环境：Python 3.11+
+- 代码格式：遵循 PEP 8 规范，与现有代码风格保持一致，避免无针对性的全库格式化变更。
+- 类型注解：新增函数与核心 Service 接口必须包含完整的类型提示 (Type Hints)。
 
-## 2. 依赖
+## 2. 依赖管理原则
 
-- 业务依赖写入 `requirements.txt`（与 `pyproject.toml` dynamic 一致）。  
-- 新增重型依赖需有明确理由；**避免**为一点切块再引入半套 Agent 框架。  
-- LangChain：仅允许薄胶水（splitter/embeddings/可选 loader）；新逻辑优先 stdlib + httpx + 自有 service。
+- 运行时业务依赖统一在 `requirements.txt` 中声明，与 `pyproject.toml` 保持一致。
+- 引入新增依赖需经过必要性评估，优先使用 Python 标准库、`httpx` 与原生轻量封装，避免为基础功能引入庞大框架。
+- 框架集成限制：对第三方框架仅允许使用切块器与嵌入接口等轻量工具，核心业务逻辑一律在原生 Service 层实现。
 
-## 3. 代码放置
+## 3. 模块组织规范
 
-- 路由按域进 `backend/api/routers/`。  
-- 跨路由用例进 `backend/api/services/`。  
-- 解析进 `backend/parsers/`。  
-- 不要把秘密写进仓库；示例用占位符。
+- 路由层：按业务域收敛在 `backend/api/routers/` 目录中，仅负责 HTTP 请求验证与响应映射。
+- 业务编排层：跨实体事务编排统一封装在 `backend/api/services/` 目录中。
+- 文档解析层：可插拔格式解析器集中在 `backend/parsers/`。
+- 凭证隔离：禁止在代码仓库中硬编码任何真实密钥，示例均使用标准占位符。
 
-## 4. 异步
+## 4. 异步并发与资源管理
 
-- FastAPI handler 可 async。  
-- CPU/阻塞（重解析、部分客户端）使用 `asyncio.to_thread` 或既有 worker，避免堵事件循环。  
-- 与 DB 会话：注意生命周期，勿跨 task 共享乱用 session。
+- 路由 Handler 优先使用 `async def`。
+- 阻塞型操作（如重量级解析、密集图像抽取等）使用 `asyncio.to_thread` 或后台持久化 Worker 执行，避免阻塞主事件循环。
+- 数据库连接与会话：严格管理 SQLAlchemy 会话生命周期，禁止跨异步 Task 共享同一个未加锁的 DB Session。
 
-## 5. 测试
+## 5. 自动化测试规范
 
-- 最低：`pytest tests/test_smoke_architecture.py`  
-- 新行为：优先单测纯函数（RRF、build_messages、parser 夹具）。  
-- 无 Ollama 时：mock 外部调用；不把「必须连本机大模型」当单元测试前提。  
-- 验证话术区分：**冒烟通过 ≠ 生产 E2E 全绿**。
+- 基础冒烟：执行 `pytest tests/test_smoke_architecture.py` 确保分层与路由接线无误。
+- 纯函数测试优先：优先为 RRF 融合计算、Prompt 组装以及 Parser 适配器编写针对性的单元测试。
+- 外部依赖隔离：针对模型推理等外部服务采用 Mock 方案，不将真实的本地模型服务作为单元测试的前置依赖。
+- 结果表述严谨：区分单元冒烟测试通过与全量生产集成验证通过，不作夸大结论。
 
-## 6. 日志
+## 6. 日志记录标准
 
-- 使用项目 `backend.core.logging` 获取 logger。  
-- 任务失败打 clear 错误；成功路径避免刷屏。
+- 统一通过 `backend.core.logging` 获取标准 Logger 实例。
+- 异常场景记录完整的上下文与错误堆栈；高频正常链路保持日志整洁，避免无意义的日志刷屏。
 
-## 7. Git 与提交（建议）
+## 7. 版本控制规范
 
-- 小步提交；subject 清晰：`fix:`, `feat:`, `docs:`, `refactor:`, `test:`  
-- 不提交：`venv/`、`.env` 真密钥、本地 DB、大型二进制模型。  
-- 不改写无关历史。
+- 采用原子化小步提交策略，提交信息遵循 Conventional Commits 规范（`feat:`, `fix:`, `docs:`, `refactor:`, `test:`）。
+- 忽略规则：严禁提交虚拟环境目录、包含真实凭据的 `.env` 文件、本地 SQLite/LanceDB 数据文件以及大体积二进制模型权重。
 
-## 8. 文档同步
+## 8. 文档与代码同步纪律
 
-行为变更时更新：
+接口契约或系统行为发生变更时，必须同步更新：
+1. 对应的 `specs/*.md` 规范文档
+2. 用户手册 `README.md`
+3. 演进路线图 `docs/UPGRADE_ROADMAP.md`
 
-1. 对应 `specs/*.md`  
-2. 必要时 `README.md`  
-3. 长期任务更新 `UPGRADE_ROADMAP.md` 或 `.hermes/plans/*`
+## 9. 工程质量红线
 
-## 9. 禁止清单
-
-- 禁止在默认路径绕过租户过滤做「全局向量扫描」。  
-- 禁止静默吞掉入库异常并标 finished。  
-- 禁止把 AGPL 项目描述成无 copyleft 约束。  
-- 禁止为了演示伪造 HNSW/评估数据。
+- 严禁在默认检索路径中绕过租户过滤条件进行全局向量检索。
+- 严禁静默吞掉解析入库过程中的异常并将任务错误标记为成功。
+- 严禁隐瞒 AGPL-3.0 开源许可协议的传染性与合规约束。
+- 严禁在测试或演示环节伪造评测指标与索引结构。

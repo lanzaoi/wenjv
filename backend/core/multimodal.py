@@ -1,8 +1,8 @@
 """Multimodal RAG: OCR-first caption + table extraction, Gemini VL fallback."""
 from __future__ import annotations
 
-import base64, io, logging, re
-from typing import List, Optional
+import base64, io, logging
+from typing import List
 
 logger = logging.getLogger(__name__)
 
@@ -56,13 +56,8 @@ async def _ocr_for_caption(image_bytes: bytes, settings) -> str:
     try:
         from backend.core.ocr_client import ocr_image_bytes
 
-        prev = getattr(settings, "OCR_MODE", "off")
-        if prev == "off" and getattr(settings, "MULTIMODAL_ENABLED", False):
-            settings.OCR_MODE = "always"
-        try:
-            return (await ocr_image_bytes(image_bytes)).strip()
-        finally:
-            settings.OCR_MODE = prev
+        force_ocr = getattr(settings, "MULTIMODAL_ENABLED", False)
+        return (await ocr_image_bytes(image_bytes, force=force_ocr)).strip()
     except Exception as e:
         logger.warning(f"OCR caption failed, will try Gemini: {e}")
         return ""
@@ -129,7 +124,7 @@ def _extract_markdown_tables(text: str) -> List[str]:
             j = i + 1
             while j < len(lines) and _is_separator_line(lines[j]):
                 j += 1
-            if j < len(lines) and _is_table_header_line(lines[i]):
+            if j > i + 1 and j < len(lines) and ("|" in lines[j]):
                 end = j
                 while end < len(lines) and ("|" in lines[end]):
                     end += 1
@@ -174,16 +169,26 @@ async def extract_tables_from_pdf(pdf_path: str) -> List[str]:
 async def process_pdf_images(pdf_path: str, resource_id: str = None):
     """Extract images + OCR-first captions from PDF. Returns list of Documents."""
     from langchain.schema import Document
+    from backend.core.visual_assets import VisualAssetStore
+
     images = extract_images_from_pdf(pdf_path)
     if not images:
         return []
     docs = []
     for i, img_bytes in enumerate(images):
+        saved_path = VisualAssetStore.save_visual_asset(
+            resource_id=resource_id,
+            filename=f"pdf_img_{i+1}.jpg",
+            image_bytes=img_bytes,
+        )
         caption = await generate_caption(img_bytes)
         if caption:
             docs.append(Document(page_content=caption, metadata={
-                "source_type": "image_caption", "resource_id": resource_id or "",
+                "source_type": "image_caption",
+                "resource_id": resource_id or "",
                 "source": "multimodal",
+                "image_path": saved_path,
+                "page": str(i + 1),
             }))
     return docs
 
@@ -227,14 +232,21 @@ async def process_pdf_multimodal(pdf_path: str, doc_id: str, username: str, user
         return 0
 
     from langchain.schema import Document
+    from backend.core.visual_assets import VisualAssetStore
     new_docs = []
     for i, img_bytes in enumerate(images):
+        saved_path = VisualAssetStore.save_visual_asset(
+            resource_id=doc_id,
+            filename=f"pdf_img_{i+1}.jpg",
+            image_bytes=img_bytes,
+        )
         caption = await generate_caption(img_bytes, settings.GEMINI_VL_MODEL)
         if caption:
             new_docs.append(Document(page_content=f"[图片 {i+1}]: {caption}", metadata={
                 "source_type": "image_caption", "resource_id": doc_id,
                 "belongs_to": username, "user_id": str(user_id),
                 "source": "multimodal", "title": f"Image {i+1} from {doc_id}",
+                "image_path": saved_path, "page": str(i + 1),
             }))
         table_md = await extract_tables_from_image(img_bytes, settings.GEMINI_VL_MODEL)
         if table_md:

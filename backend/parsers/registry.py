@@ -29,9 +29,32 @@ class ParserRegistry:
         raise ValueError(f"No parser available for file: {file_path}")
 
 
+import os
+from collections import OrderedDict
+
 # module-level singleton
 registry = ParserRegistry()
 
+_PARSE_CACHE: OrderedDict[tuple, List[ParsedChunk]] = OrderedDict()
+_MAX_PARSE_CACHE = 64
+
 
 def parse_document(file_path: str) -> List[ParsedChunk]:
-    return registry.parse(file_path)
+    if os.path.exists(file_path):
+        try:
+            stat = os.stat(file_path)
+            cache_key = (file_path, stat.st_mtime_ns, stat.st_size)
+            if cache_key in _PARSE_CACHE:
+                _PARSE_CACHE.move_to_end(cache_key)
+                return _PARSE_CACHE[cache_key]
+        except Exception:
+            cache_key = None
+    else:
+        cache_key = None
+
+    res = registry.parse(file_path)
+    if cache_key is not None:
+        _PARSE_CACHE[cache_key] = res
+        if len(_PARSE_CACHE) > _MAX_PARSE_CACHE:
+            _PARSE_CACHE.popitem(last=False)
+    return res

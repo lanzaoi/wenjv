@@ -79,15 +79,18 @@ async def health():
 
     # DB 探活（异步，不阻塞事件循环）
     db_status = "unreachable"
+    db_error = None
     try:
         async with async_engine.connect() as conn:
             await conn.execute(text("SELECT 1"))
         db_status = "connected"
-    except Exception:
-        pass
+    except Exception as e:
+        db_error = str(e)
+        logger.warning(f"Health check DB unreachable: {e}")
 
     # LanceDB 探活
     vs_status = "unreachable"
+    vs_error = None
     try:
         lance_dir = settings.LANCE_DB_VECTOR_STORE_PERSISTS_DIRECTOY
         if os.path.isdir(lance_dir):
@@ -98,14 +101,20 @@ async def health():
                 vs_status = "ready"
             else:
                 vs_status = "table_missing"
-    except Exception:
-        pass
+    except Exception as e:
+        vs_error = str(e)
+        logger.warning(f"Health check LanceDB unreachable: {e}")
 
-    return {
+    res = {
         "status": "ok" if db_status == "connected" else "degraded",
         "db": db_status,
         "vector_store": vs_status,
     }
+    if db_error:
+        res["db_error"] = db_error
+    if vs_error:
+        res["vector_store_error"] = vs_error
+    return res
 
 
 def start_server():

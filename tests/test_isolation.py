@@ -126,7 +126,7 @@ def setup_isolation_env(tmp_path):
     app.dependency_overrides.clear()
 
 
-def test_api_isolation_matrix():
+def test_api_isolation_matrix(monkeypatch):
     """Execute the 8-scenario API isolation test matrix."""
     client = TestClient(app)
     headers_b = {"Authorization": "Bearer token_b"}
@@ -169,7 +169,7 @@ def test_api_isolation_matrix():
 
     # 6. POST /chat: B asking question -> Should not mention A's note content
     # With RAG_REFUSE_ON_EMPTY=True, 0 retrieval results must trigger refusal and no LLM call
-    settings.RAG_REFUSE_ON_EMPTY = True
+    monkeypatch.setattr(settings, "RAG_REFUSE_ON_EMPTY", True)
     with patch("backend.api.services.chat.stream_openai_chat") as m_openai, \
          patch("backend.api.services.chat.stream_ollama_chat") as m_ollama:
         res6 = client.post("/chat", json={"question": "What is in note A?", "use_rag": True}, headers=headers_b)

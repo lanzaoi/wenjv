@@ -24,7 +24,10 @@ def search_resources(prompt: str, user_id: int, limit: int = 20) -> list[dict]:
             # Search Notes
             notes = session.query(Note).filter(
                 Note.user_id == user_id,
-                Note.title.ilike(search_term)
+                or_(
+                    Note.title.ilike(search_term),
+                    Note.tags.ilike(search_term),
+                )
             ).limit(limit).all()
             for note in notes:
                 results.append({
@@ -37,7 +40,10 @@ def search_resources(prompt: str, user_id: int, limit: int = 20) -> list[dict]:
             # Search Files
             files = session.query(FileUpload).filter(
                 FileUpload.user_id == user_id,
-                FileUpload.original_filename.ilike(search_term)
+                or_(
+                    FileUpload.original_filename.ilike(search_term),
+                    FileUpload.tags.ilike(search_term),
+                )
             ).limit(limit).all()
             for f in files:
                 results.append({
@@ -52,7 +58,8 @@ def search_resources(prompt: str, user_id: int, limit: int = 20) -> list[dict]:
                 Link.user_id == user_id,
                 or_(
                     Link.title.ilike(search_term),
-                    Link.url.ilike(search_term)
+                    Link.url.ilike(search_term),
+                    Link.tags.ilike(search_term),
                 )
             ).limit(limit).all()
             for link in links:

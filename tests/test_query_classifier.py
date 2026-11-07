@@ -63,56 +63,28 @@ def _mock_doc(doc_id: str, content: str) -> Document:
 
 
 @pytest.fixture
-def mock_search_env():
-    old_hybrid = settings.HYBRID_SEARCH_ENABLED
-    old_backend = settings.HYBRID_KEYWORD_BACKEND
-    old_rrf_k = settings.HYBRID_RRF_K
-    old_wv = settings.HYBRID_RRF_WEIGHT_VECTOR
-    old_wk = settings.HYBRID_RRF_WEIGHT_KEYWORD
-    old_ws = settings.HYBRID_RRF_WEIGHT_STRUCTURED
-    old_enabled = settings.QUERY_CLASSIFIER_ENABLED
-    old_short_boost = getattr(settings, "QUERY_CLASSIFIER_SHORT_BOOST", 2.0)
-    old_long_boost = getattr(settings, "QUERY_CLASSIFIER_LONG_BOOST", 2.0)
-    old_max_w = getattr(settings, "QUERY_CLASSIFIER_MAX_WEIGHT", 5.0)
-    old_rerank = settings.RERANK_ENABLED
-    old_structured = settings.STRUCTURED_RECALL_ENABLED
-
-    settings.HYBRID_SEARCH_ENABLED = True
-    settings.HYBRID_KEYWORD_BACKEND = "fts5"
-    settings.HYBRID_RRF_K = 5
-    settings.HYBRID_RRF_WEIGHT_VECTOR = 1.0
-    settings.HYBRID_RRF_WEIGHT_KEYWORD = 1.0
-    settings.HYBRID_RRF_WEIGHT_STRUCTURED = 0.0
-    settings.RERANK_ENABLED = False
-    settings.STRUCTURED_RECALL_ENABLED = False
-
-    yield
-
-    settings.HYBRID_SEARCH_ENABLED = old_hybrid
-    settings.HYBRID_KEYWORD_BACKEND = old_backend
-    settings.HYBRID_RRF_K = old_rrf_k
-    settings.HYBRID_RRF_WEIGHT_VECTOR = old_wv
-    settings.HYBRID_RRF_WEIGHT_KEYWORD = old_wk
-    settings.HYBRID_RRF_WEIGHT_STRUCTURED = old_ws
-    settings.QUERY_CLASSIFIER_ENABLED = old_enabled
-    settings.QUERY_CLASSIFIER_SHORT_BOOST = old_short_boost
-    settings.QUERY_CLASSIFIER_LONG_BOOST = old_long_boost
-    settings.QUERY_CLASSIFIER_MAX_WEIGHT = old_max_w
-    settings.RERANK_ENABLED = old_rerank
-    settings.STRUCTURED_RECALL_ENABLED = old_structured
+def mock_search_env(monkeypatch):
+    monkeypatch.setattr(settings, "HYBRID_SEARCH_ENABLED", True)
+    monkeypatch.setattr(settings, "HYBRID_KEYWORD_BACKEND", "fts5")
+    monkeypatch.setattr(settings, "HYBRID_RRF_K", 5)
+    monkeypatch.setattr(settings, "HYBRID_RRF_WEIGHT_VECTOR", 1.0)
+    monkeypatch.setattr(settings, "HYBRID_RRF_WEIGHT_KEYWORD", 1.0)
+    monkeypatch.setattr(settings, "HYBRID_RRF_WEIGHT_STRUCTURED", 0.0)
+    monkeypatch.setattr(settings, "RERANK_ENABLED", False)
+    monkeypatch.setattr(settings, "STRUCTURED_RECALL_ENABLED", False)
 
 
 @pytest.mark.asyncio
-async def test_dynamic_rrf_weight_calculation_and_cap(mock_search_env):
+async def test_dynamic_rrf_weight_calculation_and_cap(mock_search_env, monkeypatch):
     """Test dynamic RRF weight boosting and max weight cap in search pipeline."""
     # We configure initial w_v=1.0, w_k=1.0.
     # For short keyword ('Python'), boost=10.0, max_w=4.0 -> w_k capped at 4.0.
     # RRF score for k1 = 4.0 / (5 + 1) = 2/3. In search_documents, return distance is 1.0 / rrf_score = 1.5.
     # RRF score for v1 = 1.0 / (5 + 1) = 1/6. Distance is 6.0.
-    settings.QUERY_CLASSIFIER_ENABLED = True
-    settings.QUERY_CLASSIFIER_SHORT_BOOST = 10.0
-    settings.QUERY_CLASSIFIER_SHORT_KEYWORD_BOOST = 10.0
-    settings.QUERY_CLASSIFIER_MAX_WEIGHT = 4.0
+    monkeypatch.setattr(settings, "QUERY_CLASSIFIER_ENABLED", True)
+    monkeypatch.setattr(settings, "QUERY_CLASSIFIER_SHORT_BOOST", 10.0)
+    monkeypatch.setattr(settings, "QUERY_CLASSIFIER_SHORT_KEYWORD_BOOST", 10.0)
+    monkeypatch.setattr(settings, "QUERY_CLASSIFIER_MAX_WEIGHT", 4.0)
 
     with patch('backend.api.services.search.vector_store') as m_store, \
          patch('backend.core.fts5_utils.match_fts5') as m_fts5, \
@@ -133,12 +105,12 @@ async def test_dynamic_rrf_weight_calculation_and_cap(mock_search_env):
 
 
 @pytest.mark.asyncio
-async def test_dynamic_rrf_weight_long_question_boost(mock_search_env):
+async def test_dynamic_rrf_weight_long_question_boost(mock_search_env, monkeypatch):
     """Test dynamic RRF weight boosting for long questions."""
-    settings.QUERY_CLASSIFIER_ENABLED = True
-    settings.QUERY_CLASSIFIER_LONG_BOOST = 10.0
-    settings.QUERY_CLASSIFIER_LONG_QUESTION_BOOST = 10.0
-    settings.QUERY_CLASSIFIER_MAX_WEIGHT = 4.0
+    monkeypatch.setattr(settings, "QUERY_CLASSIFIER_ENABLED", True)
+    monkeypatch.setattr(settings, "QUERY_CLASSIFIER_LONG_BOOST", 10.0)
+    monkeypatch.setattr(settings, "QUERY_CLASSIFIER_LONG_QUESTION_BOOST", 10.0)
+    monkeypatch.setattr(settings, "QUERY_CLASSIFIER_MAX_WEIGHT", 4.0)
 
     with patch('backend.api.services.search.vector_store') as m_store, \
          patch('backend.core.fts5_utils.match_fts5') as m_fts5, \

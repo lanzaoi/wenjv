@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia'
 
 /**
- * Session chat context — survives route changes (chat ↔ library).
+ * Session chat context: survives route changes (chat ↔ library).
  * Cleared on logout. Not persisted to localStorage (blob image URLs + privacy).
  */
 export const useChatStore = defineStore('chat', {
@@ -27,7 +27,15 @@ export const useChatStore = defineStore('chat', {
       return state.messages
         .filter((m) => m.role === 'user' || m.role === 'assistant')
         .slice(-8)
-        .map((m) => ({ role: m.role, content: m.content }))
+        .map((m) => {
+          const entry = { role: m.role, content: m.content }
+          if (m.imageUrl) {
+            entry.images = [m.imageUrl]
+          } else if (m.images && Array.isArray(m.images) && m.images.length > 0) {
+            entry.images = m.images
+          }
+          return entry
+        })
     },
   },
   actions: {

@@ -1,4 +1,8 @@
 from langchain_chroma import Chroma
+try:
+    from langchain.schema import Document
+except ImportError:
+    from langchain_core.documents import Document
 from backend.core.embedder import get_embedder
 from backend.config import settings
 from backend.core.logging import get_logger
@@ -188,18 +192,6 @@ def fetch_documents(
         filter=filter_dict,
         k=window_size_modified  # Retrieve more relevant chunks
     )
-
-    # TODO: Add mmr search later
-    # retriever = vector_store.as_retriever(
-    #    search_type="mmr",  # Maximum Marginal Relevance
-    #    search_kwargs={
-    #        "k": window_size,  # Number of documents to return
-    #        "fetch_k": 20,  # Fetch more documents initially for diversity
-    #        "lambda_mult": 0.5,  # Balance between relevance and diversity
-    #        "filter": filter_dict  # Metadata filter
-    #    }
-    # )
-    # docs = retriever.get_relevant_documents(prompt)
     return docs
 
 

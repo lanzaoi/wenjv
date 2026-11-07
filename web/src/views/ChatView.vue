@@ -54,6 +54,9 @@
           subtitle="PDF · Markdown · Office · CSV…"
           :disabled="busy"
         />
+        <div class="field" style="margin-top: 10px; margin-bottom: 12px;">
+          <input v-model="uploadTags" placeholder="初始标签 (选填，逗号/空格分隔)" />
+        </div>
         <button class="btn btn-primary btn-block" type="button" :disabled="!file || busy" @click="doUpload">
           <span v-if="busy && uploading === 'file'" class="spinner" />
           <template v-else>
@@ -73,6 +76,9 @@
           subtitle="仅 png · jpg · jpeg"
           :disabled="busy"
         />
+        <div class="field" style="margin-top: 10px; margin-bottom: 12px;">
+          <input v-model="uploadTags" placeholder="初始标签 (选填，逗号/空格分隔)" />
+        </div>
         <button
           class="btn btn-primary btn-block"
           type="button"
@@ -96,6 +102,10 @@
           <label>正文</label>
           <textarea v-model="noteBody" rows="7" placeholder="Markdown / 纯文本" />
         </div>
+        <div class="field">
+          <label>标签 (选填)</label>
+          <input v-model="noteTags" placeholder="标签，逗号/空格分隔" />
+        </div>
         <button
           class="btn btn-primary btn-block"
           type="button"
@@ -111,6 +121,10 @@
         <div class="field">
           <label>URL</label>
           <input v-model="linkUrl" type="url" placeholder="https://" />
+        </div>
+        <div class="field">
+          <label>标签 (选填)</label>
+          <input v-model="linkTags" placeholder="标签，逗号/空格分隔" />
         </div>
         <button class="btn btn-primary btn-block" type="button" :disabled="!linkUrl || busy" @click="doLink">
           <Icon name="link" :size="16" />
@@ -221,11 +235,45 @@
           <div v-for="(c, i) in citations" :key="i" class="cite">
             <div class="cite-top">
               <span class="score-pill">{{ scoreLabel(c.score) }}</span>
+              <span v-if="c.tag_matched || c.metadata?.tag_matched" class="tag-status-badge matched">标签命中</span>
+              <span v-else-if="c.tag_fallback || c.metadata?.tag_fallback" class="tag-status-badge fallback">全库补充</span>
               <span class="src">{{ metaLabel(c) }}</span>
+            </div>
+            <div
+              v-if="getCitationImageUrl(c)"
+              class="cite-img-wrap"
+              title="点击查看原图"
+              @click="previewImage(getCitationImageUrl(c))"
+            >
+              <img :src="getCitationImageUrl(c)" class="cite-img" alt="引用图表" loading="lazy" />
+              <div class="cite-img-hint"><Icon name="image" :size="13" /> 点击查看大图</div>
             </div>
             <p>{{ clip(c.page_content, 220) }}</p>
           </div>
         </div>
+      </div>
+
+      <!-- Quick Tag Filter Pills for Chat -->
+      <div v-if="availableTags.length" class="chat-tags-row">
+        <span class="chat-tags-label"><Icon name="tag" :size="12" />限定标签:</span>
+        <button
+          v-for="t in availableTags"
+          :key="t.name"
+          type="button"
+          class="chat-tag-chip"
+          :class="{ selected: selectedTags.includes(t.name) }"
+          @click="toggleSelectedTag(t.name)"
+        >
+          #{{ t.name }}
+        </button>
+        <button
+          v-if="selectedTags.length"
+          type="button"
+          class="chat-tag-clear"
+          @click="selectedTags = []"
+        >
+          清除
+        </button>
       </div>
 
       <form class="composer card" @submit.prevent="sendText">
@@ -253,6 +301,18 @@
       </form>
 </section>
   </div>
+
+  <!-- Image Preview Modal -->
+  <Teleport to="body">
+    <div v-if="previewModalUrl" class="modal-backdrop" @click="previewModalUrl = null">
+      <div class="modal-content" @click.stop>
+        <button class="modal-close" type="button" @click="previewModalUrl = null" aria-label="关闭预览">
+          <Icon name="x" :size="24" />
+        </button>
+        <img :src="previewModalUrl" class="modal-img" alt="原图大图预览" />
+      </div>
+    </div>
+  </Teleport>
 </template>
 
 <script setup>
@@ -271,6 +331,7 @@ import {
   streamChat,
   streamChatByImage,
   listChatModels,
+  getTags,
 } from '../api/client'
 
 defineOptions({ name: 'ChatView' })
@@ -313,6 +374,37 @@ const scrollEl = ref(null)
 const promptEl = ref(null)
 let abortCtrl = null
 
+// Tagging state
+const availableTags = ref([])
+const selectedTags = ref([])
+const uploadTags = ref('')
+const noteTags = ref('')
+const linkTags = ref('')
+
+function toggleSelectedTag(tagName) {
+  const idx = selectedTags.value.indexOf(tagName)
+  if (idx >= 0) {
+    selectedTags.value.splice(idx, 1)
+  } else {
+    selectedTags.value.push(tagName)
+  }
+}
+
+async function loadChatTags() {
+  try {
+    const res = await getTags(auth.token, 25)
+    availableTags.value = res.tags || []
+  } catch (e) {
+    // ignore
+  }
+}
+
+function parseInputTags(str) {
+  if (!str) return undefined
+  const arr = str.split(/[,，\s]+/).map(s => s.trim().replace(/^#+/, '')).filter(Boolean)
+  return arr.length ? arr : undefined
+}
+
 function autoGrow() {
   const el = promptEl.value
   if (!el) return
@@ -331,6 +423,7 @@ onMounted(async () => {
       chat.setModels([])
     }
   }
+  await loadChatTags()
   await nextTick()
   autoGrow()
   if (scrollEl.value) scrollEl.value.scrollTop = scrollEl.value.scrollHeight
@@ -364,9 +457,11 @@ async function doUpload() {
   chat.busy = true
   uploading.value = 'file'
   try {
-    const r = await uploadFile(auth.token, file.value)
+    const r = await uploadFile(auth.token, file.value, parseInputTags(uploadTags.value))
     ingestMsg.value = `已提交：${r.filename || file.value.name}（${r.status || 'queued'}）`
     file.value = null
+    uploadTags.value = ''
+    loadChatTags()
   } catch (e) {
     ingestErr.value = e.message
   } finally {
@@ -381,9 +476,11 @@ async function doImageIngest() {
   chat.busy = true
   uploading.value = 'image'
   try {
-    const r = await uploadFile(auth.token, imageIngestFile.value)
+    const r = await uploadFile(auth.token, imageIngestFile.value, parseInputTags(uploadTags.value))
     ingestMsg.value = `图片已提交：${r.filename || imageIngestFile.value.name}`
     imageIngestFile.value = null
+    uploadTags.value = ''
+    loadChatTags()
   } catch (e) {
     ingestErr.value = e.message
   } finally {
@@ -396,10 +493,12 @@ async function doNote() {
   clearIngestFlash()
   chat.busy = true
   try {
-    const r = await createNote(auth.token, noteTitle.value, noteBody.value)
+    const r = await createNote(auth.token, noteTitle.value, noteBody.value, parseInputTags(noteTags.value))
     ingestMsg.value = `笔记已创建：${r.title}`
     noteTitle.value = ''
     noteBody.value = ''
+    noteTags.value = ''
+    loadChatTags()
   } catch (e) {
     ingestErr.value = e.message
   } finally {
@@ -411,9 +510,11 @@ async function doLink() {
   clearIngestFlash()
   chat.busy = true
   try {
-    await submitLink(auth.token, linkUrl.value)
+    await submitLink(auth.token, linkUrl.value, {}, parseInputTags(linkTags.value))
     ingestMsg.value = '链接已提交抓取'
     linkUrl.value = ''
+    linkTags.value = ''
+    loadChatTags()
   } catch (e) {
     ingestErr.value = e.message
   } finally {
@@ -426,7 +527,7 @@ function clip(s, n) {
   return s.length > n ? s.slice(0, n) + '…' : s
 }
 function scoreLabel(s) {
-  if (s == null) return '—'
+  if (s == null) return '-'
   return Number(s).toFixed(3)
 }
 function metaLabel(c) {
@@ -452,7 +553,13 @@ async function sendText() {
   if (mode.value === 'refs') {
     chat.busy = true
     try {
-      const r = await searchDocuments(auth.token, q, windowSize.value)
+      const r = await searchDocuments(
+        auth.token,
+        q,
+        windowSize.value,
+        null,
+        selectedTags.value.length ? selectedTags.value : null,
+      )
       chat.setCitations(r.documents || [])
       chat.pushMessage({
         role: 'assistant',
@@ -468,7 +575,7 @@ async function sendText() {
     return
   }
 
-  // history excludes the user message we just pushed — rebuild like before
+  // history excludes the user message we just pushed, rebuild like before
   const hist = messages.value
     .filter((m) => m.role === 'user' || m.role === 'assistant')
     .slice(0, -1)
@@ -480,6 +587,7 @@ async function sendText() {
     model: model.value || null,
     window_size: windowSize.value,
     use_rag: mode.value === 'rag',
+    tags: selectedTags.value.length ? selectedTags.value : undefined,
     history: hist,
   })
 }
@@ -524,6 +632,7 @@ async function doT0Chat() {
   chat.beginStream()
   abortCtrl = new AbortController()
   try {
+    const hist = chat.historyForApi
     await streamChatByImage(
       auth.token,
       t0File.value,
@@ -531,6 +640,7 @@ async function doT0Chat() {
         window_size: windowSize.value,
         use_rag: mode.value !== 'free',
         model: model.value || undefined,
+        history: hist && hist.length > 0 ? JSON.stringify(hist) : undefined,
       },
       onSse,
       abortCtrl.signal,
@@ -562,6 +672,19 @@ async function runStreamChat(payload) {
   }
 }
 
+const previewModalUrl = ref(null)
+
+function previewImage(url) {
+  previewModalUrl.value = url
+}
+
+function getCitationImageUrl(c) {
+  const url = c.image_url || c.metadata?.image_url
+  if (!url) return null
+  const sep = url.includes('?') ? '&' : '?'
+  return `${url}${sep}token=${encodeURIComponent(auth.token || '')}`
+}
+
 function onSse(ev) {
   if (ev.type === 'token') chat.appendStream(ev.content || '')
   else if (ev.type === 'citations') {
@@ -569,6 +692,11 @@ function onSse(ev) {
       (ev.citations || []).map((c) => ({
         page_content: c.page_content || c.snippet || '',
         score: c.score,
+        tag_matched: c.tag_matched ?? c.metadata?.tag_matched,
+        tag_fallback: c.tag_fallback ?? c.metadata?.tag_fallback,
+        has_image: c.has_image ?? c.metadata?.has_image,
+        image_url: c.image_url ?? c.metadata?.image_url,
+        image_path: c.image_path ?? c.metadata?.image_path,
         metadata: c.metadata || c,
       })),
     )
@@ -880,6 +1008,71 @@ function onSse(ev) {
   background: var(--accent-soft);
   color: var(--accent);
 }
+.tag-status-badge {
+  font-size: 11px;
+  font-weight: 500;
+  padding: 1px 7px;
+  border-radius: 4px;
+}
+.tag-status-badge.matched {
+  background: rgba(46, 125, 50, 0.1);
+  color: #2e7d32;
+  border: 1px solid rgba(46, 125, 50, 0.25);
+}
+.tag-status-badge.fallback {
+  background: rgba(0, 0, 0, 0.05);
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+}
+.chat-tags-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+.chat-tags-label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-tertiary);
+  margin-right: 2px;
+}
+.chat-tag-chip {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 9999px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all var(--dur-ui) var(--ease-out);
+}
+.chat-tag-chip:hover {
+  background: rgba(0, 0, 0, 0.05);
+  color: var(--text);
+}
+.chat-tag-chip.selected {
+  background: var(--text);
+  color: #fff;
+  border-color: var(--text);
+}
+.chat-tag-clear {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 2px 4px;
+}
+.chat-tag-clear:hover {
+  color: var(--text);
+}
 .cite .src {
   color: var(--text-secondary);
   font-weight: 500;
@@ -1035,6 +1228,93 @@ function onSse(ev) {
 }
 .btn :deep(.ui-icon) {
   flex-shrink: 0;
+}
+
+/* Citation Image Thumbnail & Zoom */
+.cite-img-wrap {
+  margin: 8px 0;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  border: 1px solid var(--border);
+  background: var(--bg-hover);
+  cursor: pointer;
+  position: relative;
+  display: inline-block;
+  max-width: 100%;
+}
+.cite-img {
+  display: block;
+  max-height: 180px;
+  max-width: 100%;
+  object-fit: contain;
+  background: #fff;
+  transition: transform 0.2s ease;
+}
+.cite-img-wrap:hover .cite-img {
+  transform: scale(1.02);
+}
+.cite-img-hint {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  padding: 3px 8px;
+  background: rgba(0, 0, 0, 0.65);
+  color: #fff;
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+.cite-img-wrap:hover .cite-img-hint {
+  opacity: 1;
+}
+
+/* High-res Image Modal Backdrop */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.75);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 9999;
+  padding: 24px;
+  backdrop-filter: blur(4px);
+}
+.modal-content {
+  position: relative;
+  max-width: 90vw;
+  max-height: 90vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.modal-img {
+  max-width: 100%;
+  max-height: 85vh;
+  object-fit: contain;
+  border-radius: var(--radius-md);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+  background: #fff;
+}
+.modal-close {
+  position: absolute;
+  top: -38px;
+  right: -10px;
+  background: none;
+  border: none;
+  color: #fff;
+  cursor: pointer;
+  padding: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.modal-close:hover {
+  opacity: 0.8;
 }
 
 </style>

@@ -75,7 +75,8 @@ async def test_image_job_failed_extraction(mock_session, image_job, image_payloa
         mock_extract.side_effect = ImageExtractionError("neither OCR nor Gemini yielded text")
         mock_vector_store.add_uploaded_document_content_to_vector_store = MagicMock()
         
-        await _execute_document(mock_session, image_job, image_payload)
+        with pytest.raises(RuntimeError, match="Image extraction failed"):
+            await _execute_document(mock_session, image_job, image_payload)
         
         mock_extract.assert_called_once()
         # Ensure it did NOT go to vector store
@@ -95,7 +96,8 @@ async def test_image_job_disabled(mock_session, image_job, image_payload):
          
         mock_settings.IMAGE_INGEST_ENABLED = False
         
-        await _execute_document(mock_session, image_job, image_payload)
+        with pytest.raises(RuntimeError, match="requires IMAGE_INGEST_ENABLED=true"):
+            await _execute_document(mock_session, image_job, image_payload)
         
         mock_extract.assert_not_called()
         mock_mark_failed.assert_called_once()

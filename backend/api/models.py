@@ -1,4 +1,4 @@
-# backend/auth/models.py
+# backend/api/models.py
 from fastapi_users.db import SQLAlchemyBaseUserTable
 from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey
 from sqlalchemy.orm import relationship
@@ -35,6 +35,7 @@ class FileUpload(Base):
     status = Column(String)
     content_type = Column(String)
     error_message = Column(String, nullable=True)
+    tags = Column(String, nullable=False, default="[]", server_default="[]")
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, onupdate=func.now())
     user_id = Column(Integer, ForeignKey("users.id"), index=True)
@@ -51,6 +52,7 @@ class Link(Base):
     favicon = Column(String)
     status = Column(String)
     error_message = Column(String, nullable=True)
+    tags = Column(String, nullable=False, default="[]", server_default="[]")
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, onupdate=func.now())
     user_id = Column(Integer, ForeignKey("users.id"), index=True)
@@ -68,6 +70,7 @@ class Note(Base):
     file_path = Column(String)
     status = Column(String)
     error_message = Column(String, nullable=True)
+    tags = Column(String, nullable=False, default="[]", server_default="[]")
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, onupdate=func.now())
     user_id = Column(Integer, ForeignKey("users.id"), index=True)

@@ -4,7 +4,6 @@ from __future__ import annotations
 import argparse
 import atexit
 import os
-import signal
 import subprocess
 import sys
 import time
@@ -37,7 +36,7 @@ def start_backend(port: int = 8000, log_level: str = "info") -> subprocess.Popen
         "backend.main:app",
         f"--port={port}",
         f"--log-level={log_level}",
-        "--host=127.0.0.1",
+        "--host=0.0.0.0",
     ]
     process = subprocess.Popen(cmd, cwd=str(ROOT))
     processes.append(process)
@@ -50,9 +49,12 @@ def start_frontend(port: int = 5173, api_url: str = "http://127.0.0.1:8000") -> 
     print(f"Starting Vue frontend on port {port} (proxy -> {api_url})...")
     env = os.environ.copy()
     env["VITE_PROXY_TARGET"] = api_url
+    local_bin = str(Path.home() / ".local" / "bin")
+    if local_bin not in env.get("PATH", ""):
+        env["PATH"] = f"{local_bin}:{env.get('PATH', '')}"
     # npm on Windows
     npm = "npm.cmd" if sys.platform == "win32" else "npm"
-    cmd = [npm, "run", "dev", "--", "--host", "127.0.0.1", "--port", str(port)]
+    cmd = [npm, "run", "dev", "--", "--host", "0.0.0.0", "--port", str(port)]
     process = subprocess.Popen(cmd, cwd=str(WEB_DIR), env=env)
     processes.append(process)
     return process
@@ -112,7 +114,7 @@ def start_all(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Start KB backend + Vue frontend")
+    parser = argparse.ArgumentParser(description="Start wenjv backend + Vue frontend")
     parser.add_argument("--backend-port", type=int, default=be_settings.SERVER_PORT)
     parser.add_argument("--frontend-port", type=int, default=5173)
     parser.add_argument(

@@ -12,8 +12,8 @@ if _PROJ not in sys.path:
 from eval.run_eval import run_queries
 
 CONFIGS = ["default", "hybrid_off", "rerank_on", "mmr_off"]
-CSV_OUTPUT = "eval/ab_matrix_1.3.csv"
-MD_OUTPUT = "eval/ab_matrix_1.3.md"
+CSV_OUTPUT = "eval/results/ab_matrix.csv"
+MD_OUTPUT = "eval/results/ab_matrix.md"
 
 async def run_matrix(limit=None, out_dir_base="eval/results", csv_output=CSV_OUTPUT, md_output=MD_OUTPUT):
     print(f"Starting M-small Matrix evaluation across {len(CONFIGS)} configs...")

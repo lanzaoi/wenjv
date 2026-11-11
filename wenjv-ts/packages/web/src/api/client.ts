@@ -1,0 +1,373 @@
+/**
+ * API client for TypeScript / Hono backend.
+ * Dev: base = '/api' (Vite proxy). Prod: set VITE_API_URL.
+ */
+const API_BASE = (import.meta.env.VITE_API_URL || '/api').replace(/\/$/, '');
+
+export interface RequestOptions {
+  method?: string;
+  token?: string | null;
+  body?: unknown;
+  headers?: Record<string, string>;
+}
+
+export interface ApiError extends Error {
+  status?: number;
+}
+
+function authHeaders(token?: string | null, extra: Record<string, string> = {}): Record<string, string> {
+  const h = { ...extra };
+  if (token) h['Authorization'] = `Bearer ${token}`;
+  return h;
+}
+
+async function parseError(res: Response): Promise<never> {
+  let detail: string = res.statusText;
+  try {
+    const j = await res.json();
+    detail = j.detail || JSON.stringify(j);
+    if (Array.isArray(detail)) {
+      detail = (detail as Array<{ msg?: string }>).map((d) => d.msg || JSON.stringify(d)).join('; ');
+    }
+  } catch {
+    try {
+      detail = await res.text();
+    } catch {
+      /* ignore */
+    }
+  }
+  const err: ApiError = new Error(detail || `HTTP ${res.status}`);
+  err.status = res.status;
+  throw err;
+}
+
+export async function apiJson<T = any>(path: string, { method = 'GET', token, body, headers }: RequestOptions = {}): Promise<T> {
+  const opts: RequestInit = {
+    method,
+    headers: authHeaders(token, {
+      ...(body !== undefined && !(body instanceof FormData)
+        ? { 'Content-Type': 'application/json' }
+        : {}),
+      ...headers,
+    }),
+  };
+  if (body !== undefined) {
+    opts.body = body instanceof FormData ? body : JSON.stringify(body);
+  }
+  const res = await fetch(`${API_BASE}${path}`, opts);
+  if (!res.ok) await parseError(res);
+  if (res.status === 204) return null as T;
+  const ct = res.headers.get('content-type') || '';
+  if (ct.includes('application/json')) return res.json();
+  return (await res.text()) as unknown as T;
+}
+
+export async function login(email: string, password: string): Promise<{ access_token: string; token_type: string }> {
+  const form = new URLSearchParams();
+  form.set('username', email);
+  form.set('password', password);
+  const res = await fetch(`${API_BASE}/auth/jwt/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: form,
+  });
+  if (!res.ok) await parseError(res);
+  return res.json();
+}
+
+export async function register(email: string, password: string): Promise<any> {
+  return apiJson('/auth/register', {
+    method: 'POST',
+    body: { email, password },
+  });
+}
+
+export async function validateToken(token: string): Promise<{ valid: boolean; user_id?: number }> {
+  return apiJson('/auth/validate-token', {
+    method: 'POST',
+    body: { token },
+  });
+}
+
+export async function listFiles(token?: string | null, skip = 0, limit = 50): Promise<any[]> {
+  return apiJson(`/file/?skip=${skip}&limit=${limit}`, { token });
+}
+
+export async function listNotes(token?: string | null, skip = 0, limit = 50): Promise<any[]> {
+  return apiJson(`/file/note?skip=${skip}&limit=${limit}`, { token });
+}
+
+export async function listLinks(token?: string | null, skip = 0, limit = 50): Promise<any[]> {
+  return apiJson(`/links/?skip=${skip}&limit=${limit}`, { token });
+}
+
+export async function uploadFile(token: string | null, file: File, tags: string[] | null = null): Promise<any> {
+  const fd = new FormData();
+  fd.append('file', file, file.name);
+  if (tags && tags.length > 0) {
+    fd.append('tags', JSON.stringify(tags));
+  }
+  return apiJson('/file/upload', { method: 'POST', token, body: fd });
+}
+
+export async function createNote(token: string | null, title: string, content: string, tags: string[] | null = null): Promise<any> {
+  const body: Record<string, unknown> = { title, content };
+  if (tags && tags.length > 0) body['tags'] = tags;
+  return apiJson('/file/note', {
+    method: 'POST',
+    token,
+    body,
+  });
+}
+
+export async function submitLink(
+  token: string | null,
+  url: string,
+  headers: Record<string, string> = {},
+  tags: string[] | null = null
+): Promise<any> {
+  const body: Record<string, unknown> = { url, headers };
+  if (tags && tags.length > 0) body['tags'] = tags;
+  return apiJson('/links/submit', {
+    method: 'POST',
+    token,
+    body,
+  });
+}
+
+export async function getTags(token?: string | null, limit = 50): Promise<string[]> {
+  return apiJson(`/documents/tags?limit=${limit}`, { token });
+}
+
+export async function updateResourceTags(
+  token: string | null,
+  sourceType: string,
+  resourceId: string | number,
+  tags: string[]
+): Promise<any> {
+  return apiJson(`/documents/${sourceType}/${resourceId}/tags`, {
+    method: 'PUT',
+    token,
+    body: { tags },
+  });
+}
+
+export async function backfillTags(token?: string | null): Promise<any> {
+  return apiJson('/documents/tags/backfill', {
+    method: 'POST',
+    token,
+  });
+}
+
+export async function deleteFile(token: string | null, fileId: string | number): Promise<any> {
+  return apiJson(`/file/${fileId}`, { method: 'DELETE', token });
+}
+
+export async function deleteNote(token: string | null, noteId: string | number): Promise<any> {
+  return apiJson(`/file/note/${noteId}`, { method: 'DELETE', token });
+}
+
+export async function deleteLink(token: string | null, linkId: string | number): Promise<any> {
+  return apiJson(`/links/${linkId}`, { method: 'DELETE', token });
+}
+
+export async function searchDocuments(
+  token: string | null,
+  prompt: string,
+  windowSize = 5,
+  sourceType: string | null = null,
+  tags: string[] | null = null
+): Promise<any[]> {
+  const body: Record<string, unknown> = {
+    prompt,
+    window_size: windowSize,
+    source_type: sourceType || null,
+  };
+  if (tags && tags.length > 0) body['tags'] = tags;
+  return apiJson('/documents/search', {
+    method: 'POST',
+    token,
+    body,
+  });
+}
+
+export async function searchByImage(
+  token: string | null,
+  file: File,
+  windowSize = 5,
+  prompt = ''
+): Promise<{ documents: any[]; count: number }> {
+  const fd = new FormData();
+  fd.append('file', file, file.name);
+  fd.append('window_size', String(windowSize));
+  if (prompt && prompt.trim()) {
+    fd.append('prompt', prompt.trim());
+  }
+  return apiJson('/documents/search/by-image', {
+    method: 'POST',
+    token,
+    body: fd,
+  });
+}
+
+export async function listChatModels(token?: string | null): Promise<any> {
+  return apiJson('/chat/models', { token });
+}
+
+/**
+ * SSE chat. onEvent({type, ...})
+ */
+export async function streamChat(
+  token: string | null,
+  payload: unknown,
+  onEvent: (data: any) => void,
+  signal?: AbortSignal
+): Promise<void> {
+  const res = await fetch(`${API_BASE}/chat`, {
+    method: 'POST',
+    headers: authHeaders(token, {
+      'Content-Type': 'application/json',
+      Accept: 'text/event-stream',
+    }),
+    body: JSON.stringify(payload),
+    signal,
+  });
+  if (!res.ok) await parseError(res);
+  await readSSE(res, onEvent);
+}
+
+export async function uploadChatAttachment(
+  token: string | null,
+  file: File,
+  sessionId?: string
+): Promise<{ id: string; filename: string; path?: string; preview_url?: string }> {
+  const fd = new FormData();
+  fd.append('file', file, file.name);
+  if (sessionId) fd.append('session_id', sessionId);
+  const res = await fetch(`${API_BASE}/chat/attachments`, {
+    method: 'POST',
+    headers: authHeaders(token),
+    body: fd,
+  });
+  if (!res.ok) await parseError(res);
+  return res.json();
+}
+
+export async function streamChatByImage(
+  token: string | null,
+  file: File,
+  fields: Record<string, unknown>,
+  onEvent: (data: any) => void,
+  signal?: AbortSignal
+): Promise<void> {
+  const fd = new FormData();
+  fd.append('file', file, file.name);
+  Object.entries(fields || {}).forEach(([k, v]) => {
+    if (v !== undefined && v !== null) fd.append(k, String(v));
+  });
+  const res = await fetch(`${API_BASE}/chat/by-image`, {
+    method: 'POST',
+    headers: authHeaders(token, { Accept: 'text/event-stream' }),
+    body: fd,
+    signal,
+  });
+  if (!res.ok) await parseError(res);
+  await readSSE(res, onEvent);
+}
+
+async function readSSE(res: Response, onEvent: (data: any) => void): Promise<void> {
+  if (!res.body) return;
+  const reader = res.body.getReader();
+  const dec = new TextDecoder();
+  let buf = '';
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    const parts = buf.split('\n');
+    buf = parts.pop() || '';
+    for (const line of parts) {
+      const t = line.trim();
+      if (!t.startsWith('data:')) continue;
+      const raw = t.slice(5).trim();
+      if (!raw) continue;
+      try {
+        onEvent(JSON.parse(raw));
+      } catch {
+        /* ignore partial */
+      }
+    }
+  }
+}
+
+export const wikiApi = {
+  getTree(token?: string | null) {
+    return apiJson('/wiki/tree', { token });
+  },
+  getPage(pageId: number | string, token?: string | null) {
+    return apiJson(`/wiki/pages/${pageId}`, { token });
+  },
+  createPage(body: unknown, token?: string | null) {
+    return apiJson('/wiki/pages', { method: 'POST', body, token });
+  },
+  updatePage(pageId: number | string, body: unknown, token?: string | null) {
+    return apiJson(`/wiki/pages/${pageId}`, { method: 'PUT', body, token });
+  },
+  deletePage(pageId: number | string, token?: string | null) {
+    return apiJson(`/wiki/pages/${pageId}`, { method: 'DELETE', token });
+  },
+  movePage(pageId: number | string, body: unknown, token?: string | null) {
+    return apiJson(`/wiki/pages/${pageId}/move`, { method: 'POST', body, token });
+  },
+  getRevisions(pageId: number | string, token?: string | null) {
+    return apiJson(`/wiki/pages/${pageId}/revisions`, { token });
+  },
+  rollbackRevision(pageId: number | string, revNo: number, token?: string | null) {
+    return apiJson(`/wiki/pages/${pageId}/rollback/${revNo}`, { method: 'POST', token });
+  },
+  uploadAsset(pageId: number | string, file: File, token?: string | null) {
+    const fd = new FormData();
+    fd.append('file', file, file.name);
+    return apiJson(`/wiki/pages/${pageId}/assets`, { method: 'POST', body: fd, token });
+  },
+  getDiff(pageId: number | string, fromRev: number, toRev: number, token?: string | null) {
+    return apiJson(`/wiki/pages/${pageId}/diff?from_rev=${fromRev}&to_rev=${toRev}`, { token });
+  },
+  getGraph(token?: string | null) {
+    return apiJson('/wiki/graph', { token });
+  },
+  searchWiki(q: string, token?: string | null) {
+    return apiJson(`/wiki/search?q=${encodeURIComponent(q)}`, { token });
+  },
+  getUnlinkedMentions(pageId: number | string, token?: string | null) {
+    return apiJson(`/wiki/pages/${pageId}/unlinked-mentions`, { token });
+  },
+  linkMention(pageId: number | string, sourcePageId: number | string, token?: string | null) {
+    return apiJson(`/wiki/pages/${pageId}/link-mention`, {
+      method: 'POST',
+      body: { source_page_id: sourcePageId },
+      token,
+    });
+  },
+  async streamCopilot(
+    pageId: number | string,
+    body: unknown,
+    token: string | null,
+    onEvent: (data: any) => void,
+    signal?: AbortSignal
+  ): Promise<void> {
+    const res = await fetch(`${API_BASE}/wiki/pages/${pageId}/copilot`, {
+      method: 'POST',
+      headers: authHeaders(token, {
+        'Content-Type': 'application/json',
+        Accept: 'text/event-stream',
+      }),
+      body: JSON.stringify(body),
+      signal,
+    });
+    if (!res.ok) await parseError(res);
+    await readSSE(res, onEvent);
+  },
+};
+
+export { API_BASE };

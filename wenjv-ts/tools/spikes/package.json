@@ -1,0 +1,30 @@
+{
+  "name": "@wenjv/spikes",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "原生/开源组件的最小真机验证。升级依赖后重跑，确认底座没坏。",
+  "scripts": {
+    "all": "tsx src/run-all.ts",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@lancedb/lancedb": "^0.41.0",
+    "@mozilla/readability": "^0.6.0",
+    "@node-rs/argon2": "^2.2.2",
+    "@wenjv/server": "workspace:*",
+    "bcryptjs": "^3.0.3",
+    "better-sqlite3": "^12.11.1",
+    "jose": "^6.2.17",
+    "jszip": "^3.10.2",
+    "linkedom": "^0.18.15",
+    "mammoth": "^1.13.0",
+    "onnxruntime-node": "^1.20.1",
+    "sharp": "^0.34.5",
+    "unpdf": "^1.9.1"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^22.20.5"
+  }
+}

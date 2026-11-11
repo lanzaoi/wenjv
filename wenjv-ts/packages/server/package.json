@@ -1,0 +1,35 @@
+{
+  "name": "@wenjv/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/main.ts",
+    "start": "tsx src/main.ts",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.19.18",
+    "@huggingface/tokenizers": "^0.2.0",
+    "@lancedb/lancedb": "^0.41.0",
+    "@mozilla/readability": "^0.6.0",
+    "@node-rs/argon2": "^2.2.2",
+    "bcryptjs": "^3.0.3",
+    "better-sqlite3": "^12.11.1",
+    "hono": "^4.13.17",
+    "jose": "^6.2.17",
+    "jszip": "^3.10.2",
+    "linkedom": "^0.18.15",
+    "mammoth": "^1.13.0",
+    "onnxruntime-node": "^1.20.1",
+    "sharp": "^0.34.5",
+    "unpdf": "^1.9.1",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/bcryptjs": "^2.4.6",
+    "@types/better-sqlite3": "^7.6.13",
+    "vitest": "^3.2.7"
+  }
+}

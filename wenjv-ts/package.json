@@ -1,0 +1,32 @@
+{
+  "name": "wenjv-ts",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.34.9",
+  "engines": {
+    "node": ">=22.12 <23"
+  },
+  "scripts": {
+    "doctor": "bash scripts/doctor.sh",
+    "spike": "pnpm --filter @wenjv/spikes run all",
+    "typecheck": "pnpm -r --parallel run typecheck",
+    "test": "pnpm -r run test",
+    "no-stubs": "bash scripts/no-stubs.sh",
+    "verify": "pnpm run no-stubs && pnpm run typecheck && pnpm run test"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "better-sqlite3",
+      "sharp",
+      "onnxruntime-node",
+      "@node-rs/argon2",
+      "esbuild",
+      "protobufjs"
+    ]
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "tsx": "^4.23.15",
+    "typescript": "~5.8.3"
+  }
+}

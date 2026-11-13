@@ -8,11 +8,29 @@
           <p class="muted sub">已入库的文件、笔记与链接</p>
         </div>
       </div>
-      <button class="btn btn-secondary" type="button" :disabled="loading" @click="reload">
-        <Icon name="refresh" :size="15" :spin="loading" />
-        <span>{{ loading ? '刷新中' : '刷新' }}</span>
-      </button>
+      <div class="head-actions">
+        <button class="btn btn-secondary" type="button" @click="openImport('legacy')">
+          <Icon name="folder" :size="15" />
+          <span>从旧库导入</span>
+        </button>
+        <button class="btn btn-primary" type="button" @click="openImport('batch')">
+          <Icon name="upload" :size="15" />
+          <span>批量导入</span>
+        </button>
+        <button class="btn btn-secondary" type="button" :disabled="loading" @click="reload">
+          <Icon name="refresh" :size="15" :spin="loading" />
+          <span>{{ loading ? '刷新中' : '刷新' }}</span>
+        </button>
+      </div>
     </header>
+
+    <ImportModal
+      :show="showImportModal"
+      :initial-tab="importTab"
+      @close="showImportModal = false"
+      @imported="handleImported"
+      @go-wiki="goToWiki"
+    />
 
     <div v-if="error" class="error-banner">
       <Icon name="x" :size="15" />
@@ -135,7 +153,8 @@
 </template>
 
 <script setup>
-import { ref, onMounted, computed, nextTick } from 'vue'
+import { ref, onMounted, onBeforeUnmount, computed, nextTick } from 'vue'
+import { useRouter } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
 import {
   listResources,
@@ -145,6 +164,7 @@ import {
 } from '../api/client'
 import Icon from '../components/Icon.vue'
 import StatusDot from '../components/StatusDot.vue'
+import ImportModal from '../components/ImportModal.vue'
 
 const sections = [
   { type: 'file', label: '文件', icon: 'file', rowIcon: 'file' },
@@ -152,6 +172,7 @@ const sections = [
   { type: 'link', label: '链接', icon: 'globe', rowIcon: 'link' },
 ]
 
+const router = useRouter()
 const auth = useAuthStore()
 const loading = ref(false)
 const error = ref('')
@@ -160,6 +181,10 @@ const totalCount = ref(0)
 const tagSummary = ref([])
 const activeTag = ref(null)
 const tagActionMessage = ref('')
+
+const showImportModal = ref(false)
+const importTab = ref('batch')
+let pollTimer = null
 
 const editingKey = ref(null)
 const editingInput = ref('')
@@ -248,22 +273,54 @@ async function refreshTags() {
   }
 }
 
-async function reload() {
-  loading.value = true
+function openImport(tab) {
+  importTab.value = tab
+  showImportModal.value = true
+}
+
+function goToWiki() {
+  showImportModal.value = false
+  router.push('/wiki')
+}
+
+async function handleImported() {
+  await reload()
+}
+
+function schedulePollIfPending() {
+  if (pollTimer) {
+    clearTimeout(pollTimer)
+    pollTimer = null
+  }
+  const hasActiveJobs = resources.value.some((r) => r.status === 'pending' || r.status === 'processing')
+  if (hasActiveJobs) {
+    pollTimer = setTimeout(() => {
+      void reload({ silent: true })
+    }, 2500)
+  }
+}
+
+async function reload(opts = {}) {
+  const silent = Boolean(opts && opts.silent)
+  if (!silent) loading.value = true
   error.value = ''
   try {
     const res = await listResources(auth.token, { limit: 200 })
     resources.value = res?.resources || []
     totalCount.value = res?.total ?? resources.value.length
     await refreshTags()
+    schedulePollIfPending()
   } catch (e) {
     error.value = e.message
   } finally {
-    loading.value = false
+    if (!silent) loading.value = false
   }
 }
 
-onMounted(reload)
+onMounted(() => reload())
+onBeforeUnmount(() => {
+  if (pollTimer) clearTimeout(pollTimer)
+})
 </script>
 
 <style scoped>
@@ -307,6 +364,12 @@ onMounted(reload)
 .head .btn {
   display: inline-flex;
   gap: 7px;
+}
+.head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 .error-banner {
   display: flex;

@@ -1,8 +1,14 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { Hono } from 'hono';
 import { authMiddleware, type AuthUser } from '../auth/middleware.js';
 import { config } from '../config.js';
+import {
+  enqueueImportedEntities,
+  importV1SnapshotIntoV2,
+  inspectLegacyV1Source,
+} from '../services/reingest.js';
 import {
   saveUploadFile,
   saveUserNote,
@@ -165,6 +171,124 @@ resourcesRouter.post('/links/bulk', authMiddleware, async (c) => {
   }
 
   return c.json({ links_added: results.length, resources: results }, 202);
+});
+
+function resolveLocalLegacyPaths(): { legacyDir: string; dbPath: string; uploadsDir: string } {
+  const legacyDir = process.env['WENJV_LEGACY_DIR'] || path.join(os.homedir(), '.config', 'wenjv');
+  return {
+    legacyDir,
+    dbPath: path.join(legacyDir, 'wenjv.db'),
+    uploadsDir: path.join(legacyDir, 'uploads'),
+  };
+}
+
+// GET /resources/import-legacy/detect
+resourcesRouter.get('/import-legacy/detect', authMiddleware, (c) => {
+  const { dbPath, uploadsDir } = resolveLocalLegacyPaths();
+  const isSameAsActive = path.resolve(dbPath) === path.resolve(config.resolvedDbPath);
+  if (isSameAsActive || !fs.existsSync(dbPath) || !fs.statSync(dbPath).isFile()) {
+    return c.json({
+      detected: false,
+      same_as_active: isSameAsActive,
+    });
+  }
+
+  const preview = inspectLegacyV1Source(dbPath, fs.existsSync(uploadsDir) ? uploadsDir : undefined);
+  return c.json({
+    detected: preview.isValidLegacyDb,
+    same_as_active: false,
+    source_label: dbPath,
+    preview,
+  });
+});
+
+// POST /resources/import-legacy
+resourcesRouter.post('/import-legacy', authMiddleware, async (c) => {
+  const user = c.get('user') as AuthUser;
+  const ct = (c.req.header('content-type') || '').toLowerCase();
+
+  if (ct.includes('multipart/form-data')) {
+    const body = await c.req.parseBody({ all: true });
+    const rawDb = Array.isArray(body['db']) ? body['db'][0] : body['db'];
+    if (!(rawDb instanceof File)) {
+      return c.json({ detail: '请先选择旧版数据库文件 (wenjv.db)' }, 400);
+    }
+
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wenjv-import-'));
+    try {
+      const tmpDbPath = path.join(tmpDir, 'wenjv.db');
+      const tmpUploadsDir = path.join(tmpDir, 'uploads');
+      fs.mkdirSync(tmpUploadsDir, { recursive: true });
+
+      const dbBuf = Buffer.from(await rawDb.arrayBuffer());
+      if (dbBuf.length === 0 || dbBuf.length > 100 * 1024 * 1024) {
+        return c.json({ detail: '数据库文件为空或超出 100MB 限制' }, 400);
+      }
+      fs.writeFileSync(tmpDbPath, dbBuf);
+
+      const attachRaw = body['files'] ?? body['uploads'];
+      const attachList = Array.isArray(attachRaw) ? attachRaw : attachRaw ? [attachRaw] : [];
+      for (const item of attachList) {
+        if (item instanceof File) {
+          const safeName = path.basename(item.name || 'file.bin');
+          if (!safeName || safeName === '.' || safeName === '..') continue;
+          const fileBuf = Buffer.from(await item.arrayBuffer());
+          if (fileBuf.length <= config.MAX_UPLOAD_BYTES) {
+            fs.writeFileSync(path.join(tmpUploadsDir, safeName), fileBuf);
+          }
+        }
+      }
+
+      const skipMissing = String(body['skip_missing'] ?? 'true') !== 'false';
+      const stats = importV1SnapshotIntoV2({
+        v1DbPath: tmpDbPath,
+        sourceUploadsDir: tmpUploadsDir,
+        copyFiles: true,
+        skipMissing,
+        targetUserId: user.id,
+        targetUserEmail: user.email,
+      });
+      const enqueued = enqueueImportedEntities(user.id, user.email, stats);
+      return c.json({ status: 'ok', stats, enqueued }, 200);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return c.json({ detail: msg }, 400);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  }
+
+  let json: Record<string, unknown> = {};
+  try {
+    json = (await c.req.json()) as Record<string, unknown>;
+  } catch {
+    json = {};
+  }
+
+  const { dbPath, uploadsDir } = resolveLocalLegacyPaths();
+  if (path.resolve(dbPath) === path.resolve(config.resolvedDbPath)) {
+    return c.json({ detail: '不能从当前正在运行的数据库自我导入' }, 400);
+  }
+  if (!fs.existsSync(dbPath) || !fs.statSync(dbPath).isFile()) {
+    return c.json({ detail: '未检测到本机旧版数据目录 (~/.config/wenjv/wenjv.db)' }, 404);
+  }
+
+  try {
+    const skipMissing = json['skip_missing'] !== false;
+    const stats = importV1SnapshotIntoV2({
+      v1DbPath: dbPath,
+      ...(fs.existsSync(uploadsDir) ? { sourceUploadsDir: uploadsDir } : {}),
+      copyFiles: true,
+      skipMissing,
+      targetUserId: user.id,
+      targetUserEmail: user.email,
+    });
+    const enqueued = enqueueImportedEntities(user.id, user.email, stats);
+    return c.json({ status: 'ok', stats, enqueued }, 200);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return c.json({ detail: msg }, 400);
+  }
 });
 
 // GET /resources/:id

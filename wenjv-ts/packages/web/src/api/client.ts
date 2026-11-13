@@ -170,6 +170,72 @@ export async function deleteResource(token: string | null, resourceId: string | 
   return apiJson(`/resources/${resourceId}`, { method: 'DELETE', token });
 }
 
+export interface LegacyImportPreview {
+  isValidLegacyDb: boolean;
+  files: number;
+  notes: number;
+  links: number;
+  wikiPages: number;
+  foundOnDisk: number;
+  missingFiles: number;
+}
+
+export interface LegacyDetectResult {
+  detected: boolean;
+  same_as_active: boolean;
+  source_label?: string;
+  preview?: LegacyImportPreview;
+}
+
+export interface LegacyImportResult {
+  status: string;
+  enqueued: number;
+  stats: {
+    files: number;
+    notes: number;
+    links: number;
+    wikiPages: number;
+    wikiRevisions: number;
+    wikiLinks: number;
+    copiedFiles: number;
+    missingFiles: number;
+  };
+}
+
+export async function detectLegacyImport(token?: string | null): Promise<LegacyDetectResult> {
+  return apiJson('/resources/import-legacy/detect', { token });
+}
+
+export async function importLocalLegacy(
+  token: string | null,
+  skipMissing = true
+): Promise<LegacyImportResult> {
+  return apiJson('/resources/import-legacy', {
+    method: 'POST',
+    token,
+    body: { source: 'local_v1', skip_missing: skipMissing },
+  });
+}
+
+export async function importLegacyBundle(
+  token: string | null,
+  dbFile: File,
+  attachmentFiles: File[] = [],
+  skipMissing = true
+): Promise<LegacyImportResult> {
+  const fd = new FormData();
+  fd.append('db', dbFile, dbFile.name);
+  fd.append('skip_missing', String(skipMissing));
+  for (const f of attachmentFiles) {
+    fd.append('files', f, f.name);
+  }
+  return apiJson('/resources/import-legacy', {
+    method: 'POST',
+    token,
+    body: fd,
+  });
+}
+
 export async function getTags(token?: string | null, limit = 100): Promise<{ tags: TagSummary[] }> {
   return apiJson(`/tags?limit=${limit}`, { token });
 }

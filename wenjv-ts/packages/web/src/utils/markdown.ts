@@ -29,7 +29,13 @@ export function slugifyHeading(text: string): string {
     .replace(/^-+|-+$/g, '');
 }
 
-export function renderMarkdown(rawMd: string): string {
+export interface RenderMarkdownOptions {
+  assetToken?: string | null;
+  knownTitles?: Set<string> | string[];
+  interactiveTasks?: boolean;
+}
+
+export function renderMarkdown(rawMd: string, options?: RenderMarkdownOptions): string {
   if (!rawMd) return '';
 
   const lines = rawMd.split('\n');
@@ -40,6 +46,7 @@ export function renderMarkdown(rawMd: string): string {
   let inList = false;
   let listType: 'ul' | 'ol' = 'ul';
   let inTable = false;
+  let taskIndex = 0;
 
   function closeList() {
     if (inList) {
@@ -104,14 +111,14 @@ export function renderMarkdown(rawMd: string): string {
         inTable = true;
         out.push('<div class="table-wrap"><table class="markdown-table"><thead><tr>');
         for (const c of rowCells) {
-          out.push(`<th>${parseInline(escapeHtml(c))}</th>`);
+          out.push(`<th>${parseInline(escapeHtml(c), options)}</th>`);
         }
         out.push('</tr></thead><tbody>');
         continue;
       } else {
         out.push('<tr>');
         for (const c of rowCells) {
-          out.push(`<td>${parseInline(escapeHtml(c))}</td>`);
+          out.push(`<td>${parseInline(escapeHtml(c), options)}</td>`);
         }
         out.push('</tr>');
         continue;
@@ -141,7 +148,7 @@ export function renderMarkdown(rawMd: string): string {
       const level = headingMatch[1].length;
       const title = headingMatch[2].trim();
       const slug = slugifyHeading(title);
-      out.push(`<h${level} id="${slug}" class="heading-${level}">${parseInline(escapeHtml(title))}</h${level}>`);
+      out.push(`<h${level} id="${slug}" class="heading-${level}">${parseInline(escapeHtml(title), options)}</h${level}>`);
       continue;
     }
 
@@ -149,7 +156,7 @@ export function renderMarkdown(rawMd: string): string {
     if (line.startsWith('>')) {
       closeList();
       const quoteText = line.replace(/^>\s?/, '');
-      out.push(`<blockquote>${parseInline(escapeHtml(quoteText))}</blockquote>`);
+      out.push(`<blockquote>${parseInline(escapeHtml(quoteText), options)}</blockquote>`);
       continue;
     }
 
@@ -158,8 +165,9 @@ export function renderMarkdown(rawMd: string): string {
     if (checkMatch && checkMatch[1] && checkMatch[2]) {
       closeList();
       const checked = checkMatch[1].toLowerCase() === 'x';
+      const disabledAttr = options?.interactiveTasks ? '' : 'disabled ';
       out.push(
-        `<div class="task-item"><input type="checkbox" disabled ${checked ? 'checked' : ''} /> <span>${parseInline(escapeHtml(checkMatch[2]))}</span></div>`
+        `<label class="task-item${checked ? ' is-done' : ''}"><input type="checkbox" ${disabledAttr}data-task-line="${i}" data-task-index="${taskIndex++}" ${checked ? 'checked' : ''} /> <span>${parseInline(escapeHtml(checkMatch[2]), options)}</span></label>`
       );
       continue;
     }
@@ -174,7 +182,7 @@ export function renderMarkdown(rawMd: string): string {
         listType = 'ul';
         out.push('<ul>');
       }
-      out.push(`<li>${parseInline(escapeHtml(ulMatch[1]))}</li>`);
+      out.push(`<li>${parseInline(escapeHtml(ulMatch[1]), options)}</li>`);
       continue;
     } else if (olMatch && olMatch[1]) {
       if (!inList || listType !== 'ol') {
@@ -183,14 +191,14 @@ export function renderMarkdown(rawMd: string): string {
         listType = 'ol';
         out.push('<ol>');
       }
-      out.push(`<li>${parseInline(escapeHtml(olMatch[1]))}</li>`);
+      out.push(`<li>${parseInline(escapeHtml(olMatch[1]), options)}</li>`);
       continue;
     } else {
       closeList();
     }
 
     // 9. Standard Paragraph
-    out.push(`<p>${parseInline(escapeHtml(line))}</p>`);
+    out.push(`<p>${parseInline(escapeHtml(line), options)}</p>`);
   }
 
   closeList();
@@ -219,8 +227,16 @@ function isSafeLinkUrl(rawUrl: string): boolean {
  * - *italic*
  * - [Link](url)
  */
-export function parseInline(text: string): string {
+export function parseInline(text: string, options?: RenderMarkdownOptions): string {
   if (!text) return '';
+
+  const knownSet =
+    options?.knownTitles instanceof Set
+      ? options.knownTitles
+      : Array.isArray(options?.knownTitles)
+        ? new Set(options.knownTitles.map((t) => t.trim()))
+        : null;
+  const assetToken = options?.assetToken ? String(options.assetToken).trim() : '';
 
   // Inline code `code` (protect from further replacements)
   const codeSnippets: string[] = [];
@@ -234,8 +250,9 @@ export function parseInline(text: string): string {
     const rawPath = unescapeHtml(String(assetPath || '')).trim();
     const label = unescapeHtml(String(alt || rawPath)).trim();
     const normalizedPath = rawPath.startsWith('mm_assets/') ? rawPath : `mm_assets/${rawPath}`;
-    const imgSrc = `/api/assets/image?path=${encodeURIComponent(normalizedPath)}`;
-    return `<div class="wiki-visual-embed"><img src="${imgSrc}" alt="${escapeHtml(label)}" class="wiki-embed-img" /><span class="wiki-embed-caption">${escapeHtml(label)}</span></div>`;
+    const tokenQuery = assetToken ? `&token=${encodeURIComponent(assetToken)}` : '';
+    const imgSrc = `/api/assets/image?path=${encodeURIComponent(normalizedPath)}${tokenQuery}`;
+    return `<div class="wiki-visual-embed"><img src="${imgSrc}" alt="${escapeHtml(label)}" loading="lazy" class="wiki-embed-img" /><span class="wiki-embed-caption">${escapeHtml(label)}</span></div>`;
   });
 
   // Wikilinks: [[Target#Anchor|Alias]] or [[Target#Anchor]] or [[Target|Alias]] or [[Target]]
@@ -245,7 +262,10 @@ export function parseInline(text: string): string {
     const rawAnchor = anchor ? unescapeHtml(anchor).trim() : '';
     const rawAlias = alias ? unescapeHtml(alias).trim() : '';
     const label = (rawAlias || (rawAnchor ? `${rawTarget}#${rawAnchor}` : rawTarget)).trim();
-    return `<button type="button" class="wiki-link-btn" data-wiki-target="${escapeHtml(rawTarget)}" data-wiki-anchor="${escapeHtml(rawAnchor)}" title="跳转到页面：${escapeHtml(rawTarget)}${rawAnchor ? ' #' + escapeHtml(rawAnchor) : ''}">📄 ${escapeHtml(label)}</button>`;
+    const isMissing = knownSet ? !knownSet.has(rawTarget) : false;
+    const cls = isMissing ? 'wiki-link-btn is-missing' : 'wiki-link-btn';
+    const titlePrefix = isMissing ? '页面尚未创建，点击新建：' : '跳转到页面：';
+    return `<button type="button" class="${cls}" data-wiki-target="${escapeHtml(rawTarget)}" data-wiki-anchor="${escapeHtml(rawAnchor)}" title="${titlePrefix}${escapeHtml(rawTarget)}${rawAnchor ? ' #' + escapeHtml(rawAnchor) : ''}">${escapeHtml(label)}</button>`;
   });
 
   // Standard Markdown Links [label](url) with safe scheme whitelist

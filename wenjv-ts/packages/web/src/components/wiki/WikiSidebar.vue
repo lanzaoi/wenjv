@@ -1,606 +1,1108 @@
 <template>
   <aside class="wiki-sidebar-panel">
     <!-- Tabs Header -->
-    <div class="sidebar-tabs">
+    <div class="sidebar-tabs" role="tablist">
       <button
-        :class="['tab-btn', activeTab === 'toc' ? 'active' : '']"
+        type="button"
+        role="tab"
+        :class="['tab-btn', { 'is-active': activeTab === 'toc' }]"
         @click="activeTab = 'toc'"
-        title="目录大纲"
       >
         大纲
       </button>
       <button
-        :class="['tab-btn', activeTab === 'backlinks' ? 'active' : '']"
-        @click="activeTab = 'backlinks'"
-        title="反向链接"
+        type="button"
+        role="tab"
+        :class="['tab-btn', { 'is-active': activeTab === 'backlinks' }]"
+        @click="openBacklinksTab"
       >
         反链 ({{ backlinks.length }})
       </button>
       <button
-        :class="['tab-btn', activeTab === 'diff' ? 'active' : '']"
-        @click="fetchRevisionsAndDiff"
-        title="版本对比"
+        type="button"
+        role="tab"
+        :class="['tab-btn', { 'is-active': activeTab === 'diff' }]"
+        @click="openDiffTab"
       >
-        历史对比
+        历史
       </button>
       <button
-        :class="['tab-btn copilot-tab', activeTab === 'copilot' ? 'active' : '']"
+        type="button"
+        role="tab"
+        :class="['tab-btn', { 'is-active': activeTab === 'copilot' }]"
         @click="activeTab = 'copilot'"
-        title="AI 伴随助手"
       >
-        ✨ 助手
+        助手
       </button>
     </div>
 
     <!-- 1. TOC Tab -->
     <div v-if="activeTab === 'toc'" class="tab-content">
-      <div v-if="!toc.length" class="empty-state">当前文档无标题层级</div>
+      <div v-if="!toc.length" class="empty-state">当前文档暂无标题层级（使用 # / ## 添加）</div>
       <div v-else class="toc-list">
-        <div
-          v-for="item in toc"
-          :key="item.text"
+        <button
+          v-for="(item, idx) in toc"
+          :key="`${idx}-${item.text}`"
+          type="button"
           :class="['toc-item', `level-${item.level}`]"
           @click="$emit('scroll-to-heading', item.text)"
         >
           {{ item.text }}
-        </div>
+        </button>
       </div>
     </div>
 
     <!-- 2. Backlinks & Unlinked Mentions Tab -->
     <div v-else-if="activeTab === 'backlinks'" class="tab-content">
-      <div class="sidebar-sub-section">
-        <div class="sub-section-title">已建立引用的反链 ({{ backlinks.length }})</div>
-        <div v-if="!backlinks.length" class="empty-state">当前页面未被其他页面引用</div>
-        <div v-else class="link-list">
-          <div
+      <div v-if="sidebarError" class="sidebar-error">{{ sidebarError }}</div>
+
+      <section class="sidebar-section">
+        <div class="section-heading">
+          <span>反向链接</span>
+          <span class="section-count">{{ backlinks.length }}</span>
+        </div>
+        <div v-if="!backlinks.length" class="empty-state-compact">暂无其他页面引用当前页</div>
+        <div v-else class="card-stack">
+          <button
             v-for="link in backlinks"
-            :key="link.source_page_id"
+            :key="`${link.source_page_id}-${link.section_anchor || ''}`"
+            type="button"
             class="link-card"
             @click="$emit('open-page', link.source_page_id)"
           >
-            <div class="link-title">{{ link.source_title }}</div>
-            <div v-if="link.alias" class="link-alias">作为: {{ link.alias }}</div>
-            <div v-if="link.section_anchor" class="link-anchor">锚点: #{{ link.section_anchor }}</div>
-          </div>
+            <div class="link-card-title">{{ link.source_title || `页面 #${link.source_page_id}` }}</div>
+            <div v-if="link.section_anchor" class="link-card-sub">#{{ link.section_anchor }}</div>
+          </button>
         </div>
-      </div>
+      </section>
 
-      <div class="sidebar-sub-section mt-4">
-        <div class="flex items-center justify-between">
-          <div class="sub-section-title">未链接提及 (Unlinked Mentions)</div>
-          <button type="button" class="refresh-mentions-btn" @click="fetchUnlinkedMentions" title="刷新未链接提及">🔄</button>
+      <section class="sidebar-section">
+        <div class="section-heading">
+          <span>潜在未链接提及</span>
+          <button
+            type="button"
+            class="refresh-mini-btn"
+            :disabled="loadingMentions"
+            @click="fetchUnlinkedMentions"
+          >
+            {{ loadingMentions ? '扫描中...' : '刷新' }}
+          </button>
         </div>
-        <div v-if="loadingMentions" class="empty-state">检索提及中...</div>
-        <div v-else-if="!unlinkedMentions.length" class="empty-state">未发现提及本页面标题的内容</div>
-        <div v-else class="link-list">
+
+        <div v-if="!unlinkedMentions.length && !loadingMentions" class="empty-state-compact">
+          未发现尚未链接的标题提及
+        </div>
+        <div v-else class="card-stack">
           <div
             v-for="item in unlinkedMentions"
             :key="item.page_id"
-            class="unlinked-card"
+            class="mention-card"
           >
-            <div class="flex items-center justify-between">
-              <span class="unlinked-title" @click="$emit('open-page', item.page_id)">📄 {{ item.title }}</span>
+            <div class="mention-head">
+              <button type="button" class="mention-source-link" @click="$emit('open-page', item.page_id)">
+                {{ item.title }}
+              </button>
               <button
                 type="button"
-                class="link-mention-btn"
-                @click="onLinkMention(item.page_id)"
-                title="一键将该页面中的文本转换为 [[双链]]"
+                class="convert-link-btn"
+                :disabled="linkingMentionId === item.page_id"
+                @click="convertMention(item.page_id)"
               >
-                + 链接
+                {{ linkingMentionId === item.page_id ? '处理中' : '+ 建立双链' }}
               </button>
             </div>
-            <div
-              v-for="(m, midx) in item.mentions"
-              :key="midx"
-              class="unlinked-excerpt"
-            >
-              “...{{ m.excerpt }}...”
+            <div v-if="item.mentions && item.mentions.length" class="mention-excerpt">
+              L{{ item.mentions[0]!.line_no }}: {{ item.mentions[0]!.excerpt }}
             </div>
           </div>
         </div>
-      </div>
+      </section>
     </div>
 
-    <!-- 3. Diff Tab -->
+    <!-- 3. History & Diff Tab -->
     <div v-else-if="activeTab === 'diff'" class="tab-content">
-      <div v-if="loadingRevisions" class="empty-state">加载版本中...</div>
-      <div v-else-if="revisions.length < 2" class="empty-state">需要至少两个历史快照才能进行 Diff 对比</div>
-      <div v-else class="diff-container">
-        <div class="diff-selectors">
-          <label class="text-xs text-gray-500">对比版本：</label>
-          <div class="flex items-center gap-2 mt-1">
-            <select v-model="fromRev" class="select-sm" @change="onDiffChange">
-              <option v-for="r in revisions" :key="r.rev_no" :value="r.rev_no">v{{ r.rev_no }}</option>
-            </select>
-            <span class="text-xs text-gray-400">→</span>
-            <select v-model="toRev" class="select-sm" @change="onDiffChange">
-              <option v-for="r in revisions" :key="r.rev_no" :value="r.rev_no">v{{ r.rev_no }}</option>
+      <div v-if="sidebarError" class="sidebar-error">{{ sidebarError }}</div>
+
+      <div v-if="loadingRevs" class="empty-state">加载版本记录...</div>
+      <div v-else-if="revisions.length < 2" class="empty-state">
+        当前共 {{ revisions.length }} 个版本，编辑并保存两次后可对比差异与回滚。
+      </div>
+      <template v-else>
+        <div class="diff-controls">
+          <div class="diff-select-row">
+            <label>基线版本</label>
+            <select v-model.number="fromRev" class="rev-select" @change="fetchDiff">
+              <option v-for="r in revisions" :key="r.rev_no" :value="r.rev_no">
+                v{{ r.rev_no }} ({{ r.char_count }} 字)
+              </option>
             </select>
           </div>
-        </div>
-
-        <div v-if="diffLines.length" class="diff-viewer mt-3">
-          <div
-            v-for="(line, idx) in diffLines"
-            :key="idx"
-            :class="['diff-line', line.type]"
-          >
-            <span class="line-prefix">{{ line.type === 'add' ? '+' : line.type === 'del' ? '-' : ' ' }}</span>
-            <span class="line-text">{{ line.content }}</span>
+          <div class="diff-select-row">
+            <label>目标版本</label>
+            <select v-model.number="toRev" class="rev-select" @change="fetchDiff">
+              <option v-for="r in revisions" :key="r.rev_no" :value="r.rev_no">
+                v{{ r.rev_no }} ({{ r.char_count }} 字)
+              </option>
+            </select>
           </div>
-        </div>
-        <div v-else class="empty-state mt-4">两版本内容完全一致</div>
 
-        <button class="rollback-btn-full mt-4" @click="$emit('rollback', toRev)">
-          恢复至选中的目标版本 v{{ toRev }}
-        </button>
-      </div>
-    </div>
-
-    <!-- 4. Copilot Tab -->
-    <div v-else-if="activeTab === 'copilot'" class="tab-content copilot-box">
-      <div class="copilot-mode-toggle">
-        <button
-          :class="['mode-chip', copilotMode === 'page' ? 'active' : '']"
-          @click="copilotMode = 'page'"
-        >
-          单篇精读
-        </button>
-        <button
-          :class="['mode-chip', copilotMode === 'kb' ? 'active' : '']"
-          @click="copilotMode = 'kb'"
-        >
-          全库综合
-        </button>
-      </div>
-
-      <!-- Messages View -->
-      <div class="copilot-messages" ref="msgContainerRef">
-        <div v-if="!chatMessages.length" class="empty-state">
-          💡 可以就当前 Wiki 页面向 AI 提问、请求提炼核心要点或查找图表证据。
-        </div>
-        <div v-for="(msg, idx) in chatMessages" :key="idx" :class="['chat-bubble', msg.role]">
-          <div class="bubble-text">{{ msg.content }}</div>
-          <!-- Citations display in copilot -->
-          <div v-if="msg.citations && msg.citations.length" class="copilot-cite-list">
-            <div class="cite-header">📎 引用依据:</div>
-            <div
-              v-for="(c, cIdx) in msg.citations"
-              :key="cIdx"
-              class="copilot-cite-item"
-              @click="c.source_page_id ? $emit('open-page', c.source_page_id) : null"
-            >
-              <span class="cite-badge">[{{ c.index || cIdx + 1 }}]</span>
-              <span class="cite-title">{{ c.title }}</span>
-              <span v-if="c.has_image" class="cite-img-pill">🖼️</span>
+          <div class="rollback-bar">
+            <template v-if="!confirmingRollback">
+              <button
+                type="button"
+                class="rollback-btn"
+                @click="confirmingRollback = true"
+              >
+                回滚到基线 v{{ fromRev }}
+              </button>
+            </template>
+            <div v-else class="rollback-confirm">
+              <span>确认恢复 v{{ fromRev }}？</span>
+              <button type="button" class="mini-btn" @click="confirmingRollback = false">取消</button>
+              <button type="button" class="mini-btn is-danger" @click="executeRollback">确认回滚</button>
             </div>
           </div>
         </div>
-        <div v-if="isStreaming" class="streaming-dot">正在思考并查阅依据...</div>
+
+        <div class="diff-stats">
+          <span class="stat-add">+{{ diffStats.added }} 行</span>
+          <span class="stat-del">-{{ diffStats.removed }} 行</span>
+        </div>
+
+        <div v-if="loadingDiff" class="empty-state-compact">正在计算行级差异...</div>
+        <div v-else class="diff-lines">
+          <div
+            v-for="(line, i) in diffLines"
+            :key="i"
+            :class="['diff-line', `diff-${line.type}`]"
+          >
+            <span class="diff-gutter">{{ line.type === 'add' ? '+' : line.type === 'del' ? '-' : ' ' }}</span>
+            <span class="diff-text">{{ line.content || ' ' }}</span>
+          </div>
+        </div>
+      </template>
+    </div>
+
+    <!-- 4. AI Copilot Tab -->
+    <div v-else-if="activeTab === 'copilot'" class="tab-content copilot-pane">
+      <div class="copilot-toolbar">
+        <span class="copilot-subtitle">基于当前页面上下文协作</span>
+        <button
+          v-if="copilotMessages.length > 0"
+          type="button"
+          class="clear-chat-btn"
+          @click="clearCopilot"
+        >
+          清空对话
+        </button>
       </div>
 
-      <!-- Input box -->
-      <div class="copilot-input-row">
-        <input
-          v-model="inputQuestion"
-          placeholder="就当前文档提问..."
-          class="copilot-input"
-          @keydown.enter="sendCopilotQuestion"
+      <div ref="copilotListRef" class="copilot-messages">
+        <div v-if="!copilotMessages.length" class="copilot-empty">
+          <p>可以针对当前 Wiki 页面提问、提炼结构或补充内容：</p>
+          <div class="quick-prompt-list">
+            <button
+              v-for="q in QUICK_PROMPTS"
+              :key="q"
+              type="button"
+              class="quick-prompt-btn"
+              @click="sendQuickPrompt(q)"
+            >
+              {{ q }}
+            </button>
+          </div>
+        </div>
+
+        <div
+          v-for="(msg, idx) in copilotMessages"
+          :key="idx"
+          :class="['copilot-msg', `role-${msg.role}`]"
+        >
+          <div class="msg-bubble">
+            <div v-if="msg.role === 'assistant'" class="msg-prose" v-html="renderCopilotHtml(msg.content)" />
+            <div v-else>{{ msg.content }}</div>
+          </div>
+          <div v-if="msg.role === 'assistant' && msg.content && !copilotStreaming" class="msg-actions">
+            <button
+              type="button"
+              class="msg-action-btn"
+              @click="$emit('insert-into-editor', msg.content)"
+            >
+              插入到编辑器
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div class="copilot-composer">
+        <textarea
+          v-model="copilotInput"
+          rows="2"
+          class="copilot-textarea"
+          placeholder="输入指令（Enter 发送，Shift+Enter 换行）..."
+          @keydown="onCopilotKeydown"
         />
-        <button class="send-btn" :disabled="isStreaming || !inputQuestion.trim()" @click="sendCopilotQuestion">
-          ➤
-        </button>
+        <div class="composer-footer">
+          <button
+            v-if="copilotStreaming"
+            type="button"
+            class="stop-btn"
+            @click="stopCopilot"
+          >
+            停止生成
+          </button>
+          <button
+            v-else
+            type="button"
+            class="send-btn"
+            :disabled="!copilotInput.trim()"
+            @click="sendCopilot"
+          >
+            发送
+          </button>
+        </div>
       </div>
     </div>
   </aside>
 </template>
 
-<script setup>
-import { ref, watch, nextTick, onBeforeUnmount } from 'vue'
-import { wikiApi } from '../../api/client'
-import { useAuthStore } from '../../stores/auth'
+<script setup lang="ts">
+import { computed, nextTick, ref, watch } from 'vue';
+import { wikiApi } from '../../api/client';
+import { useAuthStore } from '../../stores/auth';
+import type { WikiBacklink } from '../../stores/wiki';
+import { renderMarkdown } from '../../utils/markdown';
 
-const props = defineProps({
-  pageId: { type: Number, default: null },
-  backlinks: { type: Array, default: () => [] },
-  toc: { type: Array, default: () => [] },
-})
-
-const emit = defineEmits(['open-page', 'rollback', 'scroll-to-heading'])
-
-const auth = useAuthStore()
-const activeTab = ref('toc')
-
-// Unlinked Mentions state
-const unlinkedMentions = ref([])
-const loadingMentions = ref(false)
-
-async function fetchUnlinkedMentions() {
-  if (!props.pageId) return
-  loadingMentions.value = true
-  try {
-    const data = await wikiApi.getUnlinkedMentions(props.pageId, auth.token)
-    unlinkedMentions.value = Array.isArray(data) ? data : []
-  } catch (err) {
-    console.warn('Failed to load unlinked mentions:', err)
-  } finally {
-    loadingMentions.value = false
-  }
+interface RevisionSummary {
+  rev_no: number;
+  title: string;
+  char_count: number;
+  created_at: string;
 }
 
-async function onLinkMention(sourcePageId) {
-  if (!props.pageId) return
-  try {
-    await wikiApi.linkMention(props.pageId, sourcePageId, auth.token)
-    await fetchUnlinkedMentions()
-    // Refresh page if needed
-  } catch (err) {
-    alert(`链接失败: ${err.message || err}`)
-  }
+interface UnlinkedMentionItem {
+  page_id: number;
+  title: string;
+  slug: string;
+  mentions: Array<{ line_no: number; excerpt: string }>;
 }
 
-watch(
-  () => [props.pageId, activeTab.value],
-  ([pid, tab]) => {
-    if (pid && tab === 'backlinks') {
-      fetchUnlinkedMentions()
+interface DiffLineItem {
+  type: 'add' | 'del' | 'same';
+  content: string;
+}
+
+const QUICK_PROMPTS = [
+  '提炼当前页面的核心要点列表',
+  '检查内容结构并给出补充建议',
+  '生成一段简洁的页面导读摘要',
+];
+
+const props = defineProps<{
+  pageId: number;
+  content: string;
+  revisionCount: number;
+  backlinks: WikiBacklink[];
+}>();
+
+const emit = defineEmits<{
+  (e: 'open-page', pageId: number): void;
+  (e: 'scroll-to-heading', text: string): void;
+  (e: 'rollback-rev', revNo: number): void;
+  (e: 'mention-linked'): void;
+  (e: 'insert-into-editor', text: string): void;
+}>();
+
+const auth = useAuthStore();
+
+const activeTab = ref<'toc' | 'backlinks' | 'diff' | 'copilot'>('toc');
+const sidebarError = ref<string | null>(null);
+
+// Backlinks & unlinked mentions
+const unlinkedMentions = ref<UnlinkedMentionItem[]>([]);
+const loadingMentions = ref(false);
+const linkingMentionId = ref<number | null>(null);
+
+// Revisions & diff
+const revisions = ref<RevisionSummary[]>([]);
+const fromRev = ref(1);
+const toRev = ref(1);
+const diffLines = ref<DiffLineItem[]>([]);
+const loadingRevs = ref(false);
+const loadingDiff = ref(false);
+const confirmingRollback = ref(false);
+
+// Copilot
+const copilotMessages = ref<Array<{ role: 'user' | 'assistant'; content: string }>>([]);
+const copilotInput = ref('');
+const copilotStreaming = ref(false);
+const copilotListRef = ref<HTMLDivElement | null>(null);
+let copilotController: AbortController | null = null;
+
+// Parse headings from markdown content while ignoring fenced code blocks
+const toc = computed(() => {
+  const lines = (props.content || '').split('\n');
+  const headings: Array<{ level: number; text: string }> = [];
+  let inFence = false;
+  for (const line of lines) {
+    if (/^\s*```/.test(line)) {
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence) continue;
+    const m = line.match(/^(#{1,4})\s+(.+)$/);
+    if (m && m[1] && m[2]) {
+      headings.push({
+        level: m[1].length,
+        text: m[2].trim(),
+      });
     }
   }
-)
+  return headings;
+});
 
-// Diff state
-const revisions = ref([])
-const fromRev = ref(1)
-const toRev = ref(2)
-const diffLines = ref([])
-const loadingRevisions = ref(false)
-
-// Copilot state
-const copilotMode = ref('page')
-const inputQuestion = ref('')
-const isStreaming = ref(false)
-const chatMessages = ref([])
-const msgContainerRef = ref(null)
-
-async function fetchRevisionsAndDiff() {
-  activeTab.value = 'diff'
-  if (!props.pageId) return
-  loadingRevisions.value = true
-  try {
-    revisions.value = await wikiApi.getRevisions(props.pageId, auth.token)
-    if (revisions.value.length >= 2) {
-      fromRev.value = revisions.value[1].rev_no
-      toRev.value = revisions.value[0].rev_no
-      await onDiffChange()
-    }
-  } catch (err) {
-    console.error('Failed to load revisions', err)
-  } finally {
-    loadingRevisions.value = false
+const diffStats = computed(() => {
+  let added = 0;
+  let removed = 0;
+  for (const l of diffLines.value) {
+    if (l.type === 'add') added += 1;
+    else if (l.type === 'del') removed += 1;
   }
-}
-
-async function onDiffChange() {
-  if (!props.pageId || !fromRev.value || !toRev.value) return
-  try {
-    const res = await wikiApi.getDiff(props.pageId, fromRev.value, toRev.value, auth.token)
-    diffLines.value = res.diff_lines || []
-  } catch (err) {
-    console.error('Failed to compute diff', err)
-  }
-}
-
-let copilotAbortCtrl = null
-
-onBeforeUnmount(() => {
-  if (copilotAbortCtrl) {
-    copilotAbortCtrl.abort()
-    copilotAbortCtrl = null
-  }
-})
-
-async function sendCopilotQuestion() {
-  const q = inputQuestion.value.trim()
-  if (!q || isStreaming.value || !props.pageId) return
-
-  if (copilotAbortCtrl) {
-    copilotAbortCtrl.abort()
-  }
-  copilotAbortCtrl = new AbortController()
-
-  chatMessages.value.push({ role: 'user', content: q })
-  inputQuestion.value = ''
-  isStreaming.value = true
-
-  const assistantMsg = { role: 'assistant', content: '' }
-  chatMessages.value.push(assistantMsg)
-
-  await nextTick()
-  if (msgContainerRef.value) {
-    msgContainerRef.value.scrollTop = msgContainerRef.value.scrollHeight
-  }
-
-  try {
-    await wikiApi.streamCopilot(
-      props.pageId,
-      { question: q, mode: copilotMode.value, include_images: true },
-      auth.token,
-      (ev) => {
-        if (ev.type === 'token') {
-          assistantMsg.content += ev.content
-          if (msgContainerRef.value) {
-            msgContainerRef.value.scrollTop = msgContainerRef.value.scrollHeight
-          }
-        } else if (ev.type === 'citations') {
-          assistantMsg.citations = ev.citations || []
-        }
-      },
-      copilotAbortCtrl.signal
-    )
-  } catch (err) {
-    if (err.name !== 'AbortError') {
-      assistantMsg.content += `\n[请求错误: ${err.message}]`
-    }
-  } finally {
-    isStreaming.value = false
-    copilotAbortCtrl = null
-  }
-}
+  return { added, removed };
+});
 
 watch(
   () => props.pageId,
   () => {
-    if (copilotAbortCtrl) {
-      copilotAbortCtrl.abort()
-      copilotAbortCtrl = null
+    sidebarError.value = null;
+    confirmingRollback.value = false;
+    unlinkedMentions.value = [];
+    revisions.value = [];
+    diffLines.value = [];
+    if (copilotController) {
+      copilotController.abort();
+      copilotController = null;
     }
-    isStreaming.value = false
-    chatMessages.value = []
-    if (activeTab.value === 'diff') {
-      fetchRevisionsAndDiff()
+    copilotStreaming.value = false;
+    copilotMessages.value = [];
+
+    if (activeTab.value === 'backlinks') {
+      void fetchUnlinkedMentions();
+    } else if (activeTab.value === 'diff') {
+      void fetchRevisionsAndDiff();
     }
   }
-)
+);
+
+watch(
+  () => props.revisionCount,
+  () => {
+    if (activeTab.value === 'diff') {
+      void fetchRevisionsAndDiff();
+    } else if (activeTab.value === 'backlinks') {
+      void fetchUnlinkedMentions();
+    }
+  }
+);
+
+function openBacklinksTab() {
+  activeTab.value = 'backlinks';
+  void fetchUnlinkedMentions();
+}
+
+function openDiffTab() {
+  activeTab.value = 'diff';
+  void fetchRevisionsAndDiff();
+}
+
+async function fetchUnlinkedMentions() {
+  if (!props.pageId) return;
+  loadingMentions.value = true;
+  sidebarError.value = null;
+  try {
+    const res = await wikiApi.getUnlinkedMentions(props.pageId, auth.token);
+    unlinkedMentions.value = Array.isArray(res) ? res : [];
+  } catch (err: unknown) {
+    sidebarError.value = err instanceof Error ? err.message : '扫描未链接提及失败';
+  } finally {
+    loadingMentions.value = false;
+  }
+}
+
+async function convertMention(sourcePageId: number) {
+  linkingMentionId.value = sourcePageId;
+  sidebarError.value = null;
+  try {
+    await wikiApi.linkMention(props.pageId, sourcePageId, auth.token);
+    unlinkedMentions.value = unlinkedMentions.value.filter((m) => m.page_id !== sourcePageId);
+    emit('mention-linked');
+  } catch (err: unknown) {
+    sidebarError.value = err instanceof Error ? err.message : '转换双链失败';
+  } finally {
+    linkingMentionId.value = null;
+  }
+}
+
+async function fetchRevisionsAndDiff() {
+  if (!props.pageId) return;
+  loadingRevs.value = true;
+  sidebarError.value = null;
+  confirmingRollback.value = false;
+  try {
+    const res = await wikiApi.getRevisions(props.pageId, auth.token);
+    revisions.value = Array.isArray(res) ? res : [];
+    if (revisions.value.length >= 2) {
+      toRev.value = revisions.value[0]!.rev_no;
+      fromRev.value = revisions.value[1]!.rev_no;
+      await fetchDiff();
+    } else {
+      diffLines.value = [];
+    }
+  } catch (err: unknown) {
+    sidebarError.value = err instanceof Error ? err.message : '加载版本记录失败';
+  } finally {
+    loadingRevs.value = false;
+  }
+}
+
+async function fetchDiff() {
+  if (!props.pageId || revisions.value.length < 2) return;
+  loadingDiff.value = true;
+  sidebarError.value = null;
+  try {
+    const res = await wikiApi.getDiff(props.pageId, fromRev.value, toRev.value, auth.token);
+    diffLines.value = res?.diff_lines || [];
+  } catch (err: unknown) {
+    sidebarError.value = err instanceof Error ? err.message : '对比版本差异失败';
+  } finally {
+    loadingDiff.value = false;
+  }
+}
+
+function executeRollback() {
+  confirmingRollback.value = false;
+  emit('rollback-rev', fromRev.value);
+}
+
+function renderCopilotHtml(md: string): string {
+  return renderMarkdown(md || '', { assetToken: auth.token });
+}
+
+function scrollCopilotBottom() {
+  nextTick(() => {
+    const el = copilotListRef.value;
+    if (el) el.scrollTop = el.scrollHeight;
+  });
+}
+
+function sendQuickPrompt(text: string) {
+  copilotInput.value = text;
+  void sendCopilot();
+}
+
+function onCopilotKeydown(e: KeyboardEvent) {
+  if (e.isComposing) return;
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    void sendCopilot();
+  }
+}
+
+function stopCopilot() {
+  copilotController?.abort();
+  copilotController = null;
+  copilotStreaming.value = false;
+}
+
+function clearCopilot() {
+  stopCopilot();
+  copilotMessages.value = [];
+}
+
+async function sendCopilot() {
+  const q = copilotInput.value.trim();
+  if (!q || copilotStreaming.value) return;
+
+  copilotMessages.value.push({ role: 'user', content: q });
+  copilotInput.value = '';
+  const assistantIndex = copilotMessages.value.push({ role: 'assistant', content: '' }) - 1;
+  copilotStreaming.value = true;
+  scrollCopilotBottom();
+
+  copilotController = new AbortController();
+  try {
+    await wikiApi.streamCopilot(
+      props.pageId,
+      { question: q },
+      auth.token,
+      (ev) => {
+        const msg = copilotMessages.value[assistantIndex];
+        if (!msg) return;
+        if (ev?.type === 'token' && typeof ev.content === 'string') {
+          msg.content += ev.content;
+          scrollCopilotBottom();
+        } else if (ev?.type === 'error') {
+          msg.content += `\n\n[助手提示：${ev.error || '生成中断'}]`;
+        }
+      },
+      copilotController.signal
+    );
+  } catch (err: unknown) {
+    const isAbort = err instanceof DOMException && err.name === 'AbortError';
+    if (!isAbort) {
+      const msg = copilotMessages.value[assistantIndex];
+      if (msg && !msg.content) {
+        msg.content = `请求失败：${err instanceof Error ? err.message : String(err)}`;
+      }
+    }
+  } finally {
+    copilotStreaming.value = false;
+    copilotController = null;
+  }
+}
 </script>
 
 <style scoped>
 .wiki-sidebar-panel {
-  width: 280px;
+  width: 296px;
+  min-width: 264px;
+  max-width: 320px;
+  flex-shrink: 0;
   height: 100%;
-  border-left: 1px solid rgba(0, 0, 0, 0.08);
-  background: #fbfbfd;
   display: flex;
   flex-direction: column;
+  background: #fbfbfd;
+  border-left: 1px solid var(--border, #e5e5ea);
 }
 
 .sidebar-tabs {
-  display: flex;
-  border-bottom: 1px solid rgba(0, 0, 0, 0.06);
-  padding: 6px 6px;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 2px;
+  padding: 8px;
+  border-bottom: 1px solid var(--border, #e5e5ea);
+  background: #f5f5f7;
+  flex-shrink: 0;
 }
 
 .tab-btn {
-  flex: 1;
+  border: none;
+  background: transparent;
+  border-radius: 7px;
   padding: 6px 4px;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 500;
-  color: #6b7280;
-  border-radius: 6px;
-  text-align: center;
-  transition: all 0.15s ease;
+  color: var(--text-secondary, #6e6e73);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.12s ease, color 0.12s ease;
 }
 
 .tab-btn:hover {
-  color: #111827;
-  background: rgba(0, 0, 0, 0.03);
+  color: var(--text, #1d1d1f);
 }
 
-.tab-btn.active {
-  color: #0071e3;
-  background: rgba(0, 113, 227, 0.08);
-}
-
-.copilot-tab.active {
-  color: #8b5cf6;
-  background: rgba(139, 92, 246, 0.1);
+.tab-btn.is-active {
+  background: #ffffff;
+  color: #0058b0;
+  font-weight: 600;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
 }
 
 .tab-content {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
-  padding: 12px 10px;
+  padding: 12px;
 }
 
 .empty-state {
-  font-size: 12px;
-  color: #9ca3af;
+  padding: 28px 12px;
   text-align: center;
-  padding: 24px 8px;
-  line-height: 1.6;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text-tertiary, #86868b);
 }
 
-/* TOC */
+.empty-state-compact {
+  font-size: 12px;
+  color: var(--text-tertiary, #86868b);
+  padding: 6px 0 10px;
+}
+
+.sidebar-error {
+  margin-bottom: 10px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: #fff5f5;
+  border: 1px solid rgba(255, 59, 48, 0.25);
+  color: #b42318;
+  font-size: 12px;
+}
+
 .toc-list {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 2px;
 }
 
 .toc-item {
-  font-size: 12px;
-  color: #4b5563;
-  padding: 4px 6px;
-  border-radius: 4px;
+  width: 100%;
+  border: none;
+  background: transparent;
+  text-align: left;
+  padding: 5px 8px;
+  border-radius: 6px;
+  font-size: 12.5px;
+  color: var(--text, #1d1d1f);
   cursor: pointer;
-  transition: background 0.15s ease;
-  white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .toc-item:hover {
-  background: rgba(0, 113, 227, 0.06);
-  color: #0071e3;
+  background: rgba(0, 113, 227, 0.08);
+  color: #0058b0;
 }
 
-.toc-item.level-2 { padding-left: 14px; }
-.toc-item.level-3 { padding-left: 24px; color: #6b7280; }
+.toc-item.level-1 {
+  font-weight: 600;
+}
 
-/* Backlinks */
-.link-card {
-  padding: 8px 10px;
-  border-radius: 6px;
-  cursor: pointer;
-  background: #ffffff;
-  border: 1px solid rgba(0, 0, 0, 0.06);
+.toc-item.level-2 {
+  padding-left: 18px;
+}
+
+.toc-item.level-3 {
+  padding-left: 28px;
+  font-size: 12px;
+  color: var(--text-secondary, #6e6e73);
+}
+
+.toc-item.level-4 {
+  padding-left: 38px;
+  font-size: 12px;
+  color: var(--text-tertiary, #86868b);
+}
+
+.sidebar-section {
+  margin-bottom: 18px;
+}
+
+.section-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary, #515154);
   margin-bottom: 8px;
 }
-.link-card:hover { border-color: #0071e3; }
-.link-title { font-size: 13px; font-weight: 500; color: #111827; }
-.link-alias { font-size: 11px; color: #6b7280; margin-top: 2px; }
 
-/* Diff */
-.diff-selectors {
-  background: #ffffff;
-  padding: 8px;
-  border-radius: 6px;
-  border: 1px solid rgba(0, 0, 0, 0.05);
+.section-count {
+  background: rgba(0, 0, 0, 0.06);
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 11px;
 }
 
-.select-sm {
-  font-size: 11px;
-  padding: 2px 6px;
-  border-radius: 4px;
-  border: 1px solid rgba(0, 0, 0, 0.1);
+.refresh-mini-btn {
+  border: 1px solid var(--border, #d1d1d6);
   background: #fff;
+  color: var(--text-secondary, #6e6e73);
+  border-radius: 6px;
+  font-size: 11px;
+  padding: 2px 8px;
+  cursor: pointer;
 }
 
-.diff-viewer {
-  font-family: monospace;
+.card-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.link-card,
+.mention-card {
+  width: 100%;
+  text-align: left;
+  background: #ffffff;
+  border: 1px solid var(--border, #e5e5ea);
+  border-radius: 9px;
+  padding: 9px 10px;
+}
+
+.link-card {
+  cursor: pointer;
+  transition: border-color 0.12s ease;
+}
+
+.link-card:hover {
+  border-color: var(--accent, #0071e3);
+}
+
+.link-card-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: #0058b0;
+}
+
+.link-card-sub {
+  margin-top: 2px;
   font-size: 11px;
-  border-radius: 6px;
+  color: var(--text-tertiary, #86868b);
+}
+
+.mention-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.mention-source-link {
+  border: none;
+  background: transparent;
+  padding: 0;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text, #1d1d1f);
+  cursor: pointer;
+  text-align: left;
   overflow: hidden;
-  border: 1px solid rgba(0, 0, 0, 0.08);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mention-source-link:hover {
+  color: #0058b0;
+}
+
+.convert-link-btn {
+  border: 1px solid rgba(0, 113, 227, 0.3);
+  background: rgba(0, 113, 227, 0.08);
+  color: #0058b0;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 8px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.mention-excerpt {
+  margin-top: 5px;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--text-secondary, #6e6e73);
+  word-break: break-word;
+}
+
+.diff-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.diff-select-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-secondary, #6e6e73);
+}
+
+.rev-select {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--border, #d1d1d6);
+  border-radius: 7px;
+  background: #fff;
+  padding: 4px 7px;
+  font-size: 12px;
+}
+
+.rollback-bar {
+  padding-top: 2px;
+}
+
+.rollback-btn {
+  width: 100%;
+  border: 1px solid var(--border, #d1d1d6);
+  background: #fff;
+  color: var(--text, #1d1d1f);
+  border-radius: 7px;
+  padding: 6px 10px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.rollback-btn:hover {
+  border-color: var(--accent, #0071e3);
+  color: #0058b0;
+}
+
+.rollback-confirm {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  background: #fff5f5;
+  border: 1px solid rgba(255, 59, 48, 0.28);
+  border-radius: 7px;
+  padding: 6px 8px;
+  font-size: 11.5px;
+  color: #9e1c1c;
+}
+
+.mini-btn {
+  border: 1px solid var(--border, #d1d1d6);
+  background: #fff;
+  border-radius: 5px;
+  font-size: 11px;
+  padding: 3px 7px;
+  cursor: pointer;
+}
+
+.mini-btn.is-danger {
+  background: #ff3b30;
+  border-color: transparent;
+  color: #fff;
+}
+
+.diff-stats {
+  display: flex;
+  gap: 10px;
+  font-size: 11.5px;
+  margin-bottom: 8px;
+}
+
+.stat-add {
+  color: #15803d;
+  font-weight: 600;
+}
+
+.stat-del {
+  color: #b91c1c;
+  font-weight: 600;
+}
+
+.diff-lines {
+  background: #ffffff;
+  border: 1px solid var(--border, #e5e5ea);
+  border-radius: 8px;
+  overflow-x: auto;
+  font-family: ui-monospace, 'SFMono-Regular', Menlo, Consolas, monospace;
+  font-size: 11.5px;
+  line-height: 1.5;
 }
 
 .diff-line {
-  padding: 2px 6px;
   display: flex;
   gap: 6px;
+  padding: 1px 8px;
   white-space: pre-wrap;
   word-break: break-all;
 }
 
-.diff-line.add { background: #ecfdf5; color: #065f46; }
-.diff-line.del { background: #fef2f2; color: #991b1b; text-decoration: line-through; }
-.diff-line.same { color: #6b7280; }
-
-.rollback-btn-full {
-  width: 100%;
-  padding: 8px;
-  font-size: 12px;
-  border-radius: 6px;
-  background: #0071e3;
-  color: #fff;
-  font-weight: 500;
-  cursor: pointer;
-  border: none;
+.diff-add {
+  background: #ecfdf3;
+  color: #166534;
 }
-.rollback-btn-full:hover { background: #0060c0; }
 
-/* Copilot */
-.copilot-box {
+.diff-del {
+  background: #fef2f2;
+  color: #991b1b;
+}
+
+.diff-same {
+  color: #6e6e73;
+}
+
+.diff-gutter {
+  width: 10px;
+  flex-shrink: 0;
+  user-select: none;
+}
+
+.copilot-pane {
   display: flex;
   flex-direction: column;
-  padding: 8px;
+  padding: 0;
+  overflow: hidden;
 }
 
-.copilot-mode-toggle {
+.copilot-toolbar {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border, #e5e5ea);
   display: flex;
-  gap: 4px;
-  margin-bottom: 8px;
+  align-items: center;
+  justify-content: space-between;
+  flex-shrink: 0;
 }
 
-.mode-chip {
-  flex: 1;
-  font-size: 11px;
-  padding: 4px;
-  border-radius: 4px;
-  border: 1px solid rgba(0, 0, 0, 0.08);
-  background: #fff;
-  color: #6b7280;
+.copilot-subtitle {
+  font-size: 11.5px;
+  color: var(--text-tertiary, #86868b);
 }
-.mode-chip.active {
-  background: #8b5cf6;
-  color: #fff;
-  border-color: #8b5cf6;
+
+.clear-chat-btn {
+  border: none;
+  background: transparent;
+  font-size: 11.5px;
+  color: var(--text-secondary, #6e6e73);
+  cursor: pointer;
 }
 
 .copilot-messages {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
+  padding: 12px;
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  padding: 4px;
-  min-height: 250px;
+  gap: 10px;
 }
 
-.chat-bubble {
-  padding: 8px 10px;
-  border-radius: 8px;
-  font-size: 12px;
-  line-height: 1.5;
-  max-width: 90%;
+.copilot-empty {
+  font-size: 12.5px;
+  color: var(--text-secondary, #6e6e73);
+  line-height: 1.55;
 }
 
-.chat-bubble.user {
-  align-self: flex-end;
-  background: #0071e3;
-  color: #fff;
+.copilot-empty p {
+  margin: 0 0 10px;
 }
 
-.chat-bubble.assistant {
-  align-self: flex-start;
-  background: #ffffff;
-  border: 1px solid rgba(0, 0, 0, 0.06);
-  color: #1f2937;
-}
-
-.streaming-dot {
-  font-size: 11px;
-  color: #8b5cf6;
-  animation: pulse 1s infinite;
-}
-
-.copilot-input-row {
+.quick-prompt-list {
   display: flex;
-  gap: 4px;
-  margin-top: 8px;
+  flex-direction: column;
+  gap: 6px;
 }
 
-.copilot-input {
-  flex: 1;
+.quick-prompt-btn {
+  text-align: left;
+  border: 1px solid var(--border, #e5e5ea);
+  background: #ffffff;
+  color: var(--text, #1d1d1f);
+  border-radius: 8px;
+  padding: 8px 10px;
   font-size: 12px;
-  padding: 6px 8px;
+  cursor: pointer;
+}
+
+.quick-prompt-btn:hover {
+  border-color: var(--accent, #0071e3);
+  color: #0058b0;
+}
+
+.copilot-msg {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.copilot-msg.role-user {
+  align-items: flex-end;
+}
+
+.msg-bubble {
+  max-width: 94%;
+  border-radius: 10px;
+  padding: 8px 11px;
+  font-size: 12.5px;
+  line-height: 1.55;
+  word-break: break-word;
+}
+
+.role-user .msg-bubble {
+  background: var(--accent, #0071e3);
+  color: #ffffff;
+}
+
+.role-assistant .msg-bubble {
+  background: #ffffff;
+  border: 1px solid var(--border, #e5e5ea);
+  color: var(--text, #1d1d1f);
+}
+
+.msg-prose :deep(p) {
+  margin: 0.35em 0;
+}
+
+.msg-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.msg-action-btn {
+  border: 1px solid var(--border, #d1d1d6);
+  background: #ffffff;
+  color: #0058b0;
   border-radius: 6px;
-  border: 1px solid rgba(0, 0, 0, 0.1);
+  font-size: 11px;
+  font-weight: 500;
+  padding: 2px 8px;
+  cursor: pointer;
+}
+
+.copilot-composer {
+  padding: 10px 12px;
+  border-top: 1px solid var(--border, #e5e5ea);
+  background: #ffffff;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.copilot-textarea {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid var(--border, #d1d1d6);
+  border-radius: 8px;
+  padding: 7px 9px;
+  font-size: 12.5px;
+  resize: none;
   outline: none;
+  font-family: inherit;
+}
+
+.copilot-textarea:focus {
+  border-color: var(--accent, #0071e3);
+}
+
+.composer-footer {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.send-btn,
+.stop-btn {
+  border: none;
+  border-radius: 7px;
+  padding: 5px 14px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
 }
 
 .send-btn {
-  padding: 6px 12px;
-  border-radius: 6px;
-  background: #8b5cf6;
-  color: #fff;
-  font-size: 12px;
-  border: none;
-  cursor: pointer;
+  background: var(--accent, #0071e3);
+  color: #ffffff;
 }
+
 .send-btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
+  opacity: 0.45;
+  cursor: default;
+}
+
+.stop-btn {
+  background: #f2f2f7;
+  color: #b91c1c;
 }
 </style>

@@ -23,6 +23,14 @@ export class VaultSecurityError extends Error {
   }
 }
 
+export interface WikiBacklinkItem {
+  source_page_id: number;
+  source_title: string;
+  target_title: string;
+  alias: string;
+  section_anchor: string;
+}
+
 export interface WikiPageRecord {
   id: number;
   user_id: number;
@@ -35,6 +43,7 @@ export interface WikiPageRecord {
   sort_order: number;
   icon: string;
   tags: string[];
+  backlinks?: WikiBacklinkItem[];
   index_status: string;
   revision_count: number;
   created_at: string;
@@ -278,15 +287,36 @@ export function getWikiTree(userId: number): WikiTreeNode[] {
   return roots;
 }
 
+function getWikiBacklinks(db: ReturnType<typeof getDb>, userId: number, pageId: number): WikiBacklinkItem[] {
+  return db
+    .prepare(`
+      SELECT DISTINCT
+        wl.source_page_id AS source_page_id,
+        wp.title AS source_title,
+        wl.target_title AS target_title,
+        wl.alias AS alias,
+        wl.section_anchor AS section_anchor
+      FROM wiki_links wl
+      JOIN wiki_pages wp ON wp.id = wl.source_page_id AND wp.user_id = wl.user_id
+      WHERE wl.user_id = ?
+        AND wl.target_page_id = ?
+        AND wl.link_type = 'wikilink'
+        AND wl.source_page_id != ?
+      ORDER BY wp.title ASC
+    `)
+    .all(userId, pageId, pageId) as WikiBacklinkItem[];
+}
+
 export function getWikiPage(userId: number, pageId: number): WikiPageRecord | null {
   const db = getDb();
   const row = db.prepare('SELECT * FROM wiki_pages WHERE id = ? AND user_id = ?').get(pageId, userId) as
-    | Omit<WikiPageRecord, 'tags'>
+    | Omit<WikiPageRecord, 'tags' | 'backlinks'>
     | undefined;
   if (!row) return null;
   return {
     ...row,
     tags: getEntityTags(db, userId, 'wiki', row.id),
+    backlinks: getWikiBacklinks(db, userId, row.id),
   };
 }
 
@@ -350,6 +380,16 @@ export function createWikiPage(params: CreateWikiPageParams): WikiPageRecord {
 
   syncPageToVault(params.userId, slug, cleanTitle, params.content);
   updatePageLinks(params.userId, pageId, params.content);
+
+  // Backfill any pending unresolved wikilinks that already pointed to this new title/slug
+  db.prepare(`
+    UPDATE wiki_links
+    SET target_page_id = ?
+    WHERE user_id = ?
+      AND target_page_id IS NULL
+      AND link_type = 'wikilink'
+      AND (target_title = ? OR target_title = ?)
+  `).run(pageId, params.userId, cleanTitle, slug);
 
   enqueueJob({
     entity_type: 'wiki',

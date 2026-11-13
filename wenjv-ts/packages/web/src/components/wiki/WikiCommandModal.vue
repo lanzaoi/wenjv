@@ -132,6 +132,7 @@ function createNewPage() {
 }
 
 function handleKeydown(e) {
+  if (e.isComposing) return
   if (e.key === 'Escape') {
     e.preventDefault()
     close()

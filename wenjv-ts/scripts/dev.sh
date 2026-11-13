@@ -6,8 +6,15 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 source "$ROOT/scripts/env.sh"
 
+export WENJV_BASE_DIR="${WENJV_BASE_DIR:-$ROOT/.data}"
+mkdir -p "$WENJV_BASE_DIR"
+if [[ ! -f "$WENJV_BASE_DIR/backend.env" && -f "$HOME/.config/wenjv/backend.env" ]]; then
+  cp "$HOME/.config/wenjv/backend.env" "$WENJV_BASE_DIR/backend.env"
+fi
+
 echo "============================================="
 echo "  问据 wenjv (TypeScript) 开发环境启动中..."
+echo "  数据目录: $WENJV_BASE_DIR"
 echo "  后端: http://127.0.0.1:8787"
 echo "  前端: http://127.0.0.1:5173"
 echo "============================================="

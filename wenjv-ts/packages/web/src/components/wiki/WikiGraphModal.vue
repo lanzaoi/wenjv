@@ -1,375 +1,578 @@
 <template>
-  <div class="graph-modal-backdrop" @click.self="$emit('close')">
-    <div class="graph-modal-dialog">
-      <div class="modal-header">
-        <div class="header-left">
-          <svg class="header-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
-          </svg>
-          <span class="modal-title">Wiki 全局知识图谱</span>
-          <span class="node-count">{{ nodes.length }} 节点 · {{ edges.length }} 引用关系</span>
+  <div v-if="show" class="graph-backdrop" @click.self="$emit('close')">
+    <div class="graph-modal">
+      <header class="graph-header">
+        <div class="graph-title-wrap">
+          <h3>全局知识图谱</h3>
+          <span class="graph-stats">{{ nodes.length }} 个页面 · {{ validEdges.length }} 条关联</span>
         </div>
-        <button class="close-btn" @click="$emit('close')">✕</button>
-      </div>
+        <div class="graph-controls">
+          <button type="button" class="graph-ctrl-btn" @click="zoomBy(1.15)">+</button>
+          <button type="button" class="graph-ctrl-btn" @click="zoomBy(0.87)">-</button>
+          <button type="button" class="graph-ctrl-btn" @click="resetViewport">重置视角</button>
+          <button type="button" class="graph-close-btn" aria-label="关闭图谱" @click="$emit('close')">×</button>
+        </div>
+      </header>
 
-      <div class="canvas-container">
-        <canvas
-          ref="canvasRef"
-          @mousedown="onMouseDown"
+      <div ref="stageRef" class="graph-stage">
+        <div v-if="loading" class="graph-status">正在构建图谱关系...</div>
+        <div v-else-if="errorMsg" class="graph-status is-error">{{ errorMsg }}</div>
+        <div v-else-if="!nodes.length" class="graph-status">暂无页面，请先创建知识页面与 [[双链]] 引用。</div>
+
+        <svg
+          v-else
+          ref="svgRef"
+          class="graph-svg"
+          viewBox="-420 -260 840 520"
+          @mousedown="onCanvasMouseDown"
           @mousemove="onMouseMove"
           @mouseup="onMouseUp"
-          @wheel="onWheel"
-          @dblclick="onDoubleClick"
-        />
-        <div class="graph-tip">💡 拖拽节点移动 · 滚轮跟随鼠标缩放 · 双击节点直接跳转页面</div>
+          @mouseleave="onMouseUp"
+          @wheel.prevent="onWheel"
+        >
+          <defs>
+            <marker
+              id="wiki-arrow"
+              viewBox="0 0 10 10"
+              refX="20"
+              refY="5"
+              markerWidth="5"
+              markerHeight="5"
+              orient="auto-start-reverse"
+            >
+              <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#94a3b8" />
+            </marker>
+          </defs>
+
+          <g :transform="`translate(${panX}, ${panY}) scale(${zoom})`">
+            <!-- Edges -->
+            <g class="edges-layer">
+              <line
+                v-for="(edge, idx) in renderedEdges"
+                :key="idx"
+                :x1="edge.x1"
+                :y1="edge.y1"
+                :x2="edge.x2"
+                :y2="edge.y2"
+                :class="[
+                  'graph-edge',
+                  {
+                    'is-highlighted': hoveredId !== null && (edge.source === hoveredId || edge.target === hoveredId),
+                    'is-dimmed': hoveredId !== null && edge.source !== hoveredId && edge.target !== hoveredId,
+                  },
+                ]"
+                marker-end="url(#wiki-arrow)"
+              />
+            </g>
+
+            <!-- Nodes -->
+            <g class="nodes-layer">
+              <g
+                v-for="node in nodes"
+                :key="node.id"
+                :transform="`translate(${node.x}, ${node.y})`"
+                :class="[
+                  'graph-node',
+                  {
+                    'is-current': node.id === currentPageId,
+                    'is-dimmed': hoveredId !== null && hoveredId !== node.id && !isNeighbor(node.id, hoveredId),
+                  },
+                ]"
+                @mousedown.stop="onNodeMouseDown($event, node)"
+                @mouseenter="hoveredId = node.id"
+                @mouseleave="hoveredId = null"
+              >
+                <circle :r="nodeRadius(node.id)" class="node-circle" />
+                <text dy="24" text-anchor="middle" class="node-label">{{ node.title }}</text>
+              </g>
+            </g>
+          </g>
+        </svg>
+
+        <div class="graph-hint">拖拽空白处平移 · 滚轮缩放 · 拖拽节点调整位置 · 点击节点跳转</div>
       </div>
     </div>
   </div>
 </template>
 
-<script setup>
-import { ref, onMounted, onUnmounted } from 'vue'
-import { wikiApi } from '../../api/client'
-import { useAuthStore } from '../../stores/auth'
+<script setup lang="ts">
+import { computed, onBeforeUnmount, ref, watch } from 'vue';
+import { wikiApi } from '../../api/client';
+import { useAuthStore } from '../../stores/auth';
 
-const emit = defineEmits(['close', 'select-page'])
-
-const canvasRef = ref(null)
-const nodes = ref([])
-const edges = ref([])
-
-let animFrame = null
-let resizeObserver = null
-let isDragging = false
-let draggedNode = null
-let dpr = 1
-let logicalWidth = 800
-let logicalHeight = 600
-let zoom = 1
-let pan = { x: 0, y: 0 }
-
-function updateCanvasSize() {
-  const canvas = canvasRef.value
-  if (!canvas || !canvas.parentElement) return
-  dpr = window.devicePixelRatio || 1
-  logicalWidth = canvas.parentElement.clientWidth || 800
-  logicalHeight = canvas.parentElement.clientHeight || 600
-
-  canvas.width = Math.floor(logicalWidth * dpr)
-  canvas.height = Math.floor(logicalHeight * dpr)
-  canvas.style.width = `${logicalWidth}px`
-  canvas.style.height = `${logicalHeight}px`
+interface GraphNode {
+  id: number;
+  title: string;
+  slug: string;
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
 }
 
-onMounted(async () => {
-  const auth = useAuthStore()
+interface GraphEdge {
+  source: number;
+  target: number;
+  label?: string;
+}
+
+const props = defineProps<{
+  show: boolean;
+  currentPageId?: number | null;
+}>();
+
+const emit = defineEmits<{
+  (e: 'close'): void;
+  (e: 'select-page', pageId: number): void;
+}>();
+
+const auth = useAuthStore();
+
+const loading = ref(false);
+const errorMsg = ref<string | null>(null);
+const nodes = ref<GraphNode[]>([]);
+const edges = ref<GraphEdge[]>([]);
+const hoveredId = ref<number | null>(null);
+
+const panX = ref(0);
+const panY = ref(0);
+const zoom = ref(1);
+
+const stageRef = ref<HTMLDivElement | null>(null);
+const svgRef = ref<SVGSVGElement | null>(null);
+
+let rafId: number | null = null;
+let dragNode: GraphNode | null = null;
+let panning = false;
+let lastMouseX = 0;
+let lastMouseY = 0;
+let dragDistance = 0;
+
+const nodeMap = computed(() => {
+  const m = new Map<number, GraphNode>();
+  for (const n of nodes.value) m.set(n.id, n);
+  return m;
+});
+
+const validEdges = computed(() => {
+  const map = nodeMap.value;
+  return edges.value.filter((e) => e.source !== e.target && map.has(e.source) && map.has(e.target));
+});
+
+const degreeMap = computed(() => {
+  const counts = new Map<number, number>();
+  for (const e of validEdges.value) {
+    counts.set(e.source, (counts.get(e.source) || 0) + 1);
+    counts.set(e.target, (counts.get(e.target) || 0) + 1);
+  }
+  return counts;
+});
+
+const renderedEdges = computed(() => {
+  const map = nodeMap.value;
+  return validEdges.value.map((e) => {
+    const s = map.get(e.source)!;
+    const t = map.get(e.target)!;
+    return {
+      ...e,
+      x1: s.x,
+      y1: s.y,
+      x2: t.x,
+      y2: t.y,
+    };
+  });
+});
+
+function nodeRadius(id: number): number {
+  const deg = degreeMap.value.get(id) || 0;
+  return Math.min(18, 9 + deg * 1.5);
+}
+
+function isNeighbor(a: number, b: number): boolean {
+  return validEdges.value.some(
+    (e) => (e.source === a && e.target === b) || (e.source === b && e.target === a)
+  );
+}
+
+watch(
+  () => props.show,
+  (visible) => {
+    if (visible) {
+      resetViewport();
+      void loadGraph();
+    } else {
+      stopSimulation();
+    }
+  }
+);
+
+onBeforeUnmount(() => {
+  stopSimulation();
+});
+
+async function loadGraph() {
+  loading.value = true;
+  errorMsg.value = null;
+  stopSimulation();
+
   try {
-    const data = await wikiApi.getGraph(auth.token)
-    nodes.value = (data.nodes || []).map((n) => ({
-      ...n,
-      x: (Math.random() - 0.5) * 400 + 300,
-      y: (Math.random() - 0.5) * 300 + 200,
-      vx: 0,
-      vy: 0,
-      radius: 14,
-    }))
-    edges.value = data.edges || []
-    startSimulation()
-  } catch (err) {
-    console.error('Failed to load graph data', err)
+    const data = await wikiApi.getGraph(auth.token);
+    const rawNodes: Array<{ id: number; title: string; slug: string }> = data?.nodes || [];
+    const total = Math.max(1, rawNodes.length);
+    const radius = Math.min(180, 60 + total * 12);
+
+    nodes.value = rawNodes.map((n, idx) => {
+      const angle = (idx / total) * Math.PI * 2;
+      return {
+        ...n,
+        x: total === 1 ? 0 : Math.cos(angle) * radius,
+        y: total === 1 ? 0 : Math.sin(angle) * radius,
+        vx: 0,
+        vy: 0,
+      };
+    });
+
+    edges.value = data?.links || data?.edges || [];
+    if (nodes.value.length > 1) {
+      startSimulation(160);
+    }
+  } catch (err: unknown) {
+    errorMsg.value = err instanceof Error ? err.message : '加载知识图谱失败';
+  } finally {
+    loading.value = false;
   }
-
-  if (canvasRef.value?.parentElement) {
-    resizeObserver = new ResizeObserver(() => {
-      updateCanvasSize()
-    })
-    resizeObserver.observe(canvasRef.value.parentElement)
-  }
-})
-
-onUnmounted(() => {
-  if (animFrame) cancelAnimationFrame(animFrame)
-  if (resizeObserver) resizeObserver.disconnect()
-})
-
-function startSimulation() {
-  const canvas = canvasRef.value
-  if (!canvas) return
-  updateCanvasSize()
-  pan.x = logicalWidth / 2
-  pan.y = logicalHeight / 2
-
-  const ctx = canvas.getContext('2d')
-
-  function loop() {
-    updateForces()
-    draw(ctx, canvas)
-    animFrame = requestAnimationFrame(loop)
-  }
-  loop()
 }
 
-function updateForces() {
-  // Repulsion between nodes
-  for (let i = 0; i < nodes.value.length; i++) {
-    for (let j = i + 1; j < nodes.value.length; j++) {
-      const a = nodes.value[i]
-      const b = nodes.value[j]
-      const dx = b.x - a.x
-      const dy = b.y - a.y
-      const dist = Math.sqrt(dx * dx + dy * dy) || 1
-      if (dist < 250) {
-        const force = ((250 - dist) / dist) * 0.4
-        if (a !== draggedNode) {
-          a.x -= dx * force * 0.05
-          a.y -= dy * force * 0.05
+function stopSimulation() {
+  if (rafId !== null) {
+    cancelAnimationFrame(rafId);
+    rafId = null;
+  }
+}
+
+function startSimulation(maxSteps = 120) {
+  stopSimulation();
+  let steps = 0;
+
+  const step = () => {
+    steps += 1;
+    const ns = nodes.value;
+    const map = nodeMap.value;
+    let totalEnergy = 0;
+
+    // 1. Repulsion between all pairs
+    for (let i = 0; i < ns.length; i++) {
+      const a = ns[i]!;
+      for (let j = i + 1; j < ns.length; j++) {
+        const b = ns[j]!;
+        let dx = a.x - b.x;
+        let dy = a.y - b.y;
+        let distSq = dx * dx + dy * dy;
+        if (distSq < 1) {
+          dx = 1;
+          dy = 0;
+          distSq = 1;
         }
-        if (b !== draggedNode) {
-          b.x += dx * force * 0.05
-          b.y += dy * force * 0.05
-        }
+        const dist = Math.sqrt(distSq);
+        const force = 2600 / distSq;
+        const fx = (dx / dist) * force;
+        const fy = (dy / dist) * force;
+        a.vx += fx;
+        a.vy += fy;
+        b.vx -= fx;
+        b.vy -= fy;
       }
     }
-  }
 
-  // Edge springs
-  const nodeMap = new Map(nodes.value.map((n) => [n.id, n]))
-  for (const e of edges.value) {
-    const u = nodeMap.get(e.source)
-    const v = nodeMap.get(e.target)
-    if (!u || !v) continue
-    const dx = v.x - u.x
-    const dy = v.y - u.y
-    const dist = Math.sqrt(dx * dx + dy * dy) || 1
-    const force = (dist - 120) * 0.02
-    if (u !== draggedNode) {
-      u.x += dx * force * 0.05
-      u.y += dy * force * 0.05
+    // 2. Spring attraction along edges
+    const idealLen = 125;
+    for (const e of validEdges.value) {
+      const s = map.get(e.source);
+      const t = map.get(e.target);
+      if (!s || !t) continue;
+      const dx = t.x - s.x;
+      const dy = t.y - s.y;
+      const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+      const force = (dist - idealLen) * 0.03;
+      const fx = (dx / dist) * force;
+      const fy = (dy / dist) * force;
+      s.vx += fx;
+      s.vy += fy;
+      t.vx -= fx;
+      t.vy -= fy;
     }
-    if (v !== draggedNode) {
-      v.x += dx * force * 0.05
-      v.y += dy * force * 0.05
+
+    // 3. Center gravity + damping
+    for (const n of ns) {
+      if (dragNode && dragNode.id === n.id) continue;
+      n.vx = (n.vx - n.x * 0.012) * 0.82;
+      n.vy = (n.vy - n.y * 0.012) * 0.82;
+      n.x += n.vx;
+      n.y += n.vy;
+      totalEnergy += Math.abs(n.vx) + Math.abs(n.vy);
     }
-  }
+
+    if (steps < maxSteps && (totalEnergy > 0.15 || dragNode !== null)) {
+      rafId = requestAnimationFrame(step);
+    } else {
+      rafId = null;
+    }
+  };
+
+  rafId = requestAnimationFrame(step);
 }
 
-function draw(ctx, canvas) {
-  ctx.clearRect(0, 0, canvas.width, canvas.height)
-  ctx.save()
-  // High-DPI Scaling
-  ctx.scale(dpr, dpr)
-  ctx.translate(pan.x, pan.y)
-  ctx.scale(zoom, zoom)
-
-  const nodeMap = new Map(nodes.value.map((n) => [n.id, n]))
-
-  // Draw edges
-  ctx.strokeStyle = 'rgba(156, 163, 175, 0.4)'
-  ctx.lineWidth = 1.5
-  for (const e of edges.value) {
-    const u = nodeMap.get(e.source)
-    const v = nodeMap.get(e.target)
-    if (!u || !v) continue
-    ctx.beginPath()
-    ctx.moveTo(u.x, u.y)
-    ctx.lineTo(v.x, v.y)
-    ctx.stroke()
-  }
-
-  // Draw nodes
-  for (const n of nodes.value) {
-    ctx.fillStyle = '#0071e3'
-    ctx.beginPath()
-    ctx.arc(n.x, n.y, n.radius, 0, Math.PI * 2)
-    ctx.fill()
-    ctx.lineWidth = 2
-    ctx.strokeStyle = '#ffffff'
-    ctx.stroke()
-
-    // Title
-    ctx.fillStyle = '#1d1d1f'
-    ctx.font = '11px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif'
-    ctx.textAlign = 'center'
-    ctx.fillText(n.title, n.x, n.y + n.radius + 14)
-  }
-
-  ctx.restore()
+function resetViewport() {
+  panX.value = 0;
+  panY.value = 0;
+  zoom.value = 1;
 }
 
-function onMouseDown(e) {
-  if (!canvasRef.value) return
-  const rect = canvasRef.value.getBoundingClientRect()
-  const clickX = (e.clientX - rect.left - pan.x) / zoom
-  const clickY = (e.clientY - rect.top - pan.y) / zoom
-
-  for (const n of nodes.value) {
-    const d = Math.hypot(n.x - clickX, n.y - clickY)
-    if (d <= n.radius + 4) {
-      draggedNode = n
-      isDragging = true
-      return
-    }
-  }
-
-  isDragging = false
-  draggedNode = null
+function zoomBy(factor: number) {
+  zoom.value = Math.min(2.4, Math.max(0.4, Number((zoom.value * factor).toFixed(2))));
 }
 
-function onMouseMove(e) {
-  if (draggedNode && canvasRef.value) {
-    const rect = canvasRef.value.getBoundingClientRect()
-    draggedNode.x = (e.clientX - rect.left - pan.x) / zoom
-    draggedNode.y = (e.clientY - rect.top - pan.y) / zoom
+function onWheel(e: WheelEvent) {
+  zoomBy(e.deltaY < 0 ? 1.1 : 0.91);
+}
+
+function onCanvasMouseDown(e: MouseEvent) {
+  panning = true;
+  dragNode = null;
+  lastMouseX = e.clientX;
+  lastMouseY = e.clientY;
+}
+
+function onNodeMouseDown(e: MouseEvent, node: GraphNode) {
+  dragNode = node;
+  panning = false;
+  dragDistance = 0;
+  lastMouseX = e.clientX;
+  lastMouseY = e.clientY;
+}
+
+function onMouseMove(e: MouseEvent) {
+  const dx = e.clientX - lastMouseX;
+  const dy = e.clientY - lastMouseY;
+  lastMouseX = e.clientX;
+  lastMouseY = e.clientY;
+
+  if (dragNode) {
+    const svg = svgRef.value;
+    const scaleX = svg ? 840 / Math.max(1, svg.clientWidth) : 1;
+    const scaleY = svg ? 520 / Math.max(1, svg.clientHeight) : 1;
+    dragNode.x += (dx * scaleX) / zoom.value;
+    dragNode.y += (dy * scaleY) / zoom.value;
+    dragNode.vx = 0;
+    dragNode.vy = 0;
+    dragDistance += Math.hypot(dx, dy);
+  } else if (panning) {
+    const svg = svgRef.value;
+    const scaleX = svg ? 840 / Math.max(1, svg.clientWidth) : 1;
+    const scaleY = svg ? 520 / Math.max(1, svg.clientHeight) : 1;
+    panX.value += dx * scaleX;
+    panY.value += dy * scaleY;
   }
 }
 
 function onMouseUp() {
-  draggedNode = null
-  isDragging = false
-}
-
-function onDoubleClick(e) {
-  if (!canvasRef.value) return
-  const rect = canvasRef.value.getBoundingClientRect()
-  const clickX = (e.clientX - rect.left - pan.x) / zoom
-  const clickY = (e.clientY - rect.top - pan.y) / zoom
-
-  for (const n of nodes.value) {
-    const d = Math.hypot(n.x - clickX, n.y - clickY)
-    if (d <= n.radius + 6) {
-      emit('select-page', n.id)
-      emit('close')
-      return
-    }
+  if (dragNode && dragDistance < 5) {
+    const clickedId = dragNode.id;
+    dragNode = null;
+    emit('select-page', clickedId);
+    emit('close');
+    return;
   }
-}
-
-function onWheel(e) {
-  e.preventDefault()
-  if (!canvasRef.value) return
-  const rect = canvasRef.value.getBoundingClientRect()
-  const mouseX = e.clientX - rect.left
-  const mouseY = e.clientY - rect.top
-
-  const factor = e.deltaY < 0 ? 1.1 : 0.9
-  const newZoom = Math.max(0.3, Math.min(3, zoom * factor))
-
-  pan.x = mouseX - (mouseX - pan.x) * (newZoom / zoom)
-  pan.y = mouseY - (mouseY - pan.y) * (newZoom / zoom)
-  zoom = newZoom
+  dragNode = null;
+  panning = false;
 }
 </script>
 
 <style scoped>
-.graph-modal-backdrop {
+.graph-backdrop {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.35);
-  backdrop-filter: blur(6px);
   z-index: 100;
+  background: rgba(15, 23, 42, 0.45);
+  backdrop-filter: blur(4px);
   display: flex;
   align-items: center;
   justify-content: center;
+  padding: 24px;
 }
 
-.graph-modal-dialog {
-  width: 80vw;
-  height: 80vh;
-  max-width: 1100px;
-  background: var(--surface, #ffffff);
-  border-radius: var(--radius-sm, 12px);
+.graph-modal {
+  width: min(980px, 94vw);
+  height: min(640px, 86vh);
+  background: #ffffff;
+  border-radius: 14px;
   border: 1px solid var(--border, #e5e5ea);
-  box-shadow: 0 20px 48px -10px rgba(0, 0, 0, 0.16);
+  box-shadow: 0 24px 48px rgba(0, 0, 0, 0.22);
   display: flex;
   flex-direction: column;
   overflow: hidden;
 }
 
-.modal-header {
-  height: 52px;
+.graph-header {
+  height: 50px;
+  padding: 0 18px;
   border-bottom: 1px solid var(--border, #e5e5ea);
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 20px;
-  background: var(--surface-secondary, #fafafa);
+  flex-shrink: 0;
 }
 
-.header-left {
+.graph-title-wrap {
   display: flex;
   align-items: center;
   gap: 10px;
 }
 
-.header-icon {
-  width: 18px;
-  height: 18px;
-  color: var(--accent, #0071e3);
-}
-
-.modal-title {
-  font-size: 14px;
-  font-weight: 600;
-  letter-spacing: -0.01em;
+.graph-title-wrap h3 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 650;
   color: var(--text, #1d1d1f);
 }
 
-.node-count {
+.graph-stats {
   font-size: 12px;
   color: var(--text-tertiary, #86868b);
-  background: var(--bg-hover, #f0f0f4);
-  padding: 2px 8px;
+  background: #f2f2f7;
+  padding: 2px 9px;
   border-radius: 999px;
 }
 
-.close-btn {
+.graph-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.graph-ctrl-btn {
+  border: 1px solid var(--border, #d1d1d6);
+  background: #fff;
+  color: var(--text, #1d1d1f);
+  border-radius: 6px;
+  font-size: 12px;
+  padding: 4px 10px;
+  cursor: pointer;
+}
+
+.graph-ctrl-btn:hover {
+  background: #f5f5f7;
+}
+
+.graph-close-btn {
+  width: 28px;
+  height: 28px;
   border: none;
   background: transparent;
-  color: var(--text-tertiary, #86868b);
-  font-size: 14px;
+  font-size: 20px;
+  color: var(--text-secondary, #6e6e73);
+  border-radius: 7px;
   cursor: pointer;
-  padding: 6px;
-  border-radius: 6px;
-  transition: all 150ms ease;
 }
 
-.close-btn:hover {
-  background: var(--bg-hover, #f0f0f4);
-  color: var(--text, #1d1d1f);
+.graph-close-btn:hover {
+  background: rgba(0, 0, 0, 0.06);
 }
 
-.canvas-container {
+.graph-stage {
   flex: 1;
+  min-height: 0;
   position: relative;
-  background: #fdfdfd;
-  overflow: hidden;
+  background: radial-gradient(circle at 1px 1px, #e5e7eb 1px, transparent 0);
+  background-size: 22px 22px;
+  background-color: #fbfbfd;
 }
 
-canvas {
-  display: block;
+.graph-svg {
   width: 100%;
   height: 100%;
+  display: block;
   cursor: grab;
 }
 
-canvas:active {
+.graph-svg:active {
   cursor: grabbing;
 }
 
-.graph-tip {
+.graph-status {
   position: absolute;
-  bottom: 14px;
-  left: 50%;
-  transform: translateX(-50%);
-  background: rgba(255, 255, 255, 0.92);
-  backdrop-filter: blur(8px);
-  border: 1px solid var(--border, #e5e5ea);
-  padding: 6px 14px;
-  border-radius: 999px;
-  font-size: 11px;
-  font-weight: 500;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13.5px;
   color: var(--text-secondary, #6e6e73);
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
+}
+
+.graph-status.is-error {
+  color: #b91c1c;
+}
+
+.graph-edge {
+  stroke: #cbd5e1;
+  stroke-width: 1.5;
+  transition: stroke 0.15s ease, opacity 0.15s ease;
+}
+
+.graph-edge.is-highlighted {
+  stroke: var(--accent, #0071e3);
+  stroke-width: 2.2;
+}
+
+.graph-edge.is-dimmed {
+  opacity: 0.25;
+}
+
+.graph-node {
+  cursor: pointer;
+  transition: opacity 0.15s ease;
+}
+
+.graph-node.is-dimmed {
+  opacity: 0.3;
+}
+
+.node-circle {
+  fill: #ffffff;
+  stroke: var(--accent, #0071e3);
+  stroke-width: 2.2;
+  transition: transform 0.12s ease, fill 0.12s ease;
+}
+
+.graph-node:hover .node-circle {
+  fill: #e8f2fd;
+  transform: scale(1.12);
+}
+
+.graph-node.is-current .node-circle {
+  fill: var(--accent, #0071e3);
+  stroke: #004e9e;
+}
+
+.node-label {
+  font-size: 11.5px;
+  font-weight: 500;
+  fill: #1d1d1f;
+  pointer-events: none;
+  paint-order: stroke;
+  stroke: rgba(255, 255, 255, 0.9);
+  stroke-width: 3px;
+}
+
+.graph-hint {
+  position: absolute;
+  bottom: 10px;
+  left: 14px;
+  font-size: 11.5px;
+  color: var(--text-tertiary, #86868b);
+  background: rgba(255, 255, 255, 0.85);
+  padding: 3px 9px;
+  border-radius: 6px;
   pointer-events: none;
 }
 </style>

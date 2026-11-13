@@ -511,4 +511,47 @@ describe('Wiki Service & Routes (S7)', () => {
     expect(vecMentions.some((m) => m.page_id === noisePage.id)).toBe(false);
     expect(vecMentions.some((m) => m.page_id === validPage.id)).toBe(true);
   });
+
+  it('populates backlinks on GET /wiki/pages/:id and backfills red-links when target page is created', async () => {
+    // 1. Source page links to [[FutureConcept]] before FutureConcept exists
+    const srcResp = await env.app.request('/wiki/pages', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        title: 'IndexNote',
+        content: 'See [[FutureConcept]] for details.',
+      }),
+    });
+    expect(srcResp.status).toBe(201);
+    const srcPage = (await srcResp.json()) as { id: number; title: string };
+
+    // 2. Create FutureConcept afterwards -> should resolve pending wiki_links
+    const targetResp = await env.app.request('/wiki/pages', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        title: 'FutureConcept',
+        content: 'Future concept definition.',
+      }),
+    });
+    expect(targetResp.status).toBe(201);
+    const targetPage = (await targetResp.json()) as {
+      id: number;
+      backlinks?: Array<{ source_page_id: number; source_title: string }>;
+    };
+
+    expect(Array.isArray(targetPage.backlinks)).toBe(true);
+    expect(targetPage.backlinks?.length).toBe(1);
+    expect(targetPage.backlinks?.[0]?.source_page_id).toBe(srcPage.id);
+    expect(targetPage.backlinks?.[0]?.source_title).toBe('IndexNote');
+
+    // Graph must include the backfilled edge
+    const graphResp = await env.app.request('/wiki/graph', {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    const graph = (await graphResp.json()) as {
+      links: Array<{ source: number; target: number }>;
+    };
+    expect(graph.links.some((l) => l.source === srcPage.id && l.target === targetPage.id)).toBe(true);
+  });
 });

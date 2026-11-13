@@ -89,31 +89,62 @@ export async function validateToken(token: string): Promise<{ valid: boolean; us
   });
 }
 
-export async function listFiles(token?: string | null, skip = 0, limit = 50): Promise<any[]> {
-  return apiJson(`/file/?skip=${skip}&limit=${limit}`, { token });
+export type ResourceType = 'file' | 'note' | 'link';
+
+export interface ResourceItem {
+  id: number;
+  user_id: number;
+  type: ResourceType;
+  title: string;
+  filename: string | null;
+  original_filename: string | null;
+  source_url: string | null;
+  status: string;
+  error_message: string | null;
+  tags: string[];
+  created_at: string;
+  updated_at: string | null;
 }
 
-export async function listNotes(token?: string | null, skip = 0, limit = 50): Promise<any[]> {
-  return apiJson(`/file/note?skip=${skip}&limit=${limit}`, { token });
+export interface TagSummary {
+  id: number;
+  name: string;
+  tag: string;
+  color: string;
+  count: number;
 }
 
-export async function listLinks(token?: string | null, skip = 0, limit = 50): Promise<any[]> {
-  return apiJson(`/links/?skip=${skip}&limit=${limit}`, { token });
+export async function listResources(
+  token?: string | null,
+  options: { type?: ResourceType; tag?: string; skip?: number; limit?: number } = {}
+): Promise<{ resources: ResourceItem[]; total: number }> {
+  const params = new URLSearchParams();
+  if (options.type) params.set('type', options.type);
+  if (options.tag) params.set('tag', options.tag);
+  if (options.skip !== undefined) params.set('skip', String(options.skip));
+  if (options.limit !== undefined) params.set('limit', String(options.limit));
+  const qs = params.toString();
+  return apiJson(`/resources${qs ? '?' + qs : ''}`, { token });
 }
 
-export async function uploadFile(token: string | null, file: File, tags: string[] | null = null): Promise<any> {
+export async function uploadFile(token: string | null, file: File, tags: string[] | null = null): Promise<ResourceItem> {
   const fd = new FormData();
   fd.append('file', file, file.name);
   if (tags && tags.length > 0) {
     fd.append('tags', JSON.stringify(tags));
   }
-  return apiJson('/file/upload', { method: 'POST', token, body: fd });
+  return apiJson('/resources/files', { method: 'POST', token, body: fd });
 }
 
-export async function createNote(token: string | null, title: string, content: string, tags: string[] | null = null): Promise<any> {
+export async function createNote(
+  token: string | null,
+  title: string,
+  content: string,
+  tags: string[] | null = null
+): Promise<ResourceItem> {
   const body: Record<string, unknown> = { title, content };
   if (tags && tags.length > 0) body['tags'] = tags;
-  return apiJson('/file/note', {
+  return apiJson('/resources/notes', {
     method: 'POST',
     token,
     body,
@@ -125,50 +156,51 @@ export async function submitLink(
   url: string,
   headers: Record<string, string> = {},
   tags: string[] | null = null
-): Promise<any> {
+): Promise<ResourceItem> {
   const body: Record<string, unknown> = { url, headers };
   if (tags && tags.length > 0) body['tags'] = tags;
-  return apiJson('/links/submit', {
+  return apiJson('/resources/links', {
     method: 'POST',
     token,
     body,
   });
 }
 
-export async function getTags(token?: string | null, limit = 50): Promise<string[]> {
-  return apiJson(`/documents/tags?limit=${limit}`, { token });
+export async function deleteResource(token: string | null, resourceId: string | number): Promise<{ status: string }> {
+  return apiJson(`/resources/${resourceId}`, { method: 'DELETE', token });
+}
+
+export async function getTags(token?: string | null, limit = 100): Promise<{ tags: TagSummary[] }> {
+  return apiJson(`/tags?limit=${limit}`, { token });
+}
+
+export async function updateTag(
+  token: string | null,
+  tagId: number,
+  patch: { name?: string; color?: string }
+): Promise<TagSummary> {
+  return apiJson(`/tags/${tagId}`, {
+    method: 'PUT',
+    token,
+    body: patch,
+  });
+}
+
+export async function deleteTag(token: string | null, tagId: number): Promise<{ status: string }> {
+  return apiJson(`/tags/${tagId}`, { method: 'DELETE', token });
 }
 
 export async function updateResourceTags(
   token: string | null,
-  sourceType: string,
-  resourceId: string | number,
+  entityType: 'resource' | 'wiki',
+  entityId: string | number,
   tags: string[]
-): Promise<any> {
-  return apiJson(`/documents/${sourceType}/${resourceId}/tags`, {
+): Promise<{ tags: string[] }> {
+  return apiJson(`/tags/entities/${entityType}/${entityId}`, {
     method: 'PUT',
     token,
     body: { tags },
   });
-}
-
-export async function backfillTags(token?: string | null): Promise<any> {
-  return apiJson('/documents/tags/backfill', {
-    method: 'POST',
-    token,
-  });
-}
-
-export async function deleteFile(token: string | null, fileId: string | number): Promise<any> {
-  return apiJson(`/file/${fileId}`, { method: 'DELETE', token });
-}
-
-export async function deleteNote(token: string | null, noteId: string | number): Promise<any> {
-  return apiJson(`/file/note/${noteId}`, { method: 'DELETE', token });
-}
-
-export async function deleteLink(token: string | null, linkId: string | number): Promise<any> {
-  return apiJson(`/links/${linkId}`, { method: 'DELETE', token });
 }
 
 export async function searchDocuments(
@@ -177,14 +209,14 @@ export async function searchDocuments(
   windowSize = 5,
   sourceType: string | null = null,
   tags: string[] | null = null
-): Promise<any[]> {
+): Promise<{ documents: any[]; count: number }> {
   const body: Record<string, unknown> = {
     prompt,
     window_size: windowSize,
-    source_type: sourceType || null,
+    type: sourceType || null,
   };
   if (tags && tags.length > 0) body['tags'] = tags;
-  return apiJson('/documents/search', {
+  return apiJson('/search', {
     method: 'POST',
     token,
     body,
@@ -203,7 +235,7 @@ export async function searchByImage(
   if (prompt && prompt.trim()) {
     fd.append('prompt', prompt.trim());
   }
-  return apiJson('/documents/search/by-image', {
+  return apiJson('/search/by-image', {
     method: 'POST',
     token,
     body: fd,
@@ -240,7 +272,7 @@ export async function uploadChatAttachment(
   token: string | null,
   file: File,
   sessionId?: string
-): Promise<{ id: string; filename: string; path?: string; preview_url?: string }> {
+): Promise<{ media_url: string; media_id: string; filename: string; content_type: string; size: number }> {
   const fd = new FormData();
   fd.append('file', file, file.name);
   if (sessionId) fd.append('session_id', sessionId);

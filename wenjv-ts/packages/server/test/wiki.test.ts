@@ -1,4 +1,9 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { getDb } from '../src/db/index.js';
+import { config } from '../src/config.js';
+import { syncPageToVault, removePageFromVault } from '../src/services/wiki.js';
 import { setupTestEnv, type TestEnv } from './helper.js';
 
 describe('Wiki Service & Routes (S7)', () => {
@@ -216,5 +221,294 @@ describe('Wiki Service & Routes (S7)', () => {
       headers: { Authorization: `Bearer ${token}` },
     });
     expect(delResp.status).toBe(204);
+  });
+
+  it('enforces optimistic locking with expected_rev_no returning 409 Conflict (BUG-08)', async () => {
+    const createResp = await env.app.request('/wiki/pages', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: '并发锁测试', content: 'v1' }),
+    });
+    const page = (await createResp.json()) as { id: number; revision_count: number };
+    expect(page.revision_count).toBe(1);
+
+    // Valid expected_rev_no succeeds
+    const okResp = await env.app.request(`/wiki/pages/${page.id}`, {
+      method: 'PUT',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: 'v2', expected_rev_no: 1 }),
+    });
+    expect(okResp.status).toBe(200);
+    const updated = (await okResp.json()) as { revision_count: number };
+    expect(updated.revision_count).toBe(2);
+
+    // Stale expected_rev_no returns 409 Conflict
+    const staleResp = await env.app.request(`/wiki/pages/${page.id}`, {
+      method: 'PUT',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: 'v3-stale', expected_rev_no: 1 }),
+    });
+    expect(staleResp.status).toBe(409);
+  });
+
+  it('orchestrates page rename with aliases, tenant isolation, AST variant rewrites, and source job reindex (BUG-09/10/11)', async () => {
+    // Register second tenant user B
+    await env.app.request('/auth/register', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: 'other@example.com', password: 'Password123!' }),
+    });
+    const loginB = await env.app.request('/auth/jwt/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: 'other@example.com', password: 'Password123!' }),
+    });
+    const tokenB = ((await loginB.json()) as { access_token: string }).access_token;
+
+    // Target page under user A
+    const targetResp = await env.app.request('/wiki/pages', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: '旧页面标题', content: 'target body' }),
+    });
+    const target = (await targetResp.json()) as { id: number; user_id: number };
+
+    // Source page under user A covering empty suffix variants & code fence
+    const sourceContent = [
+      '普通链接 [[旧页面标题]]',
+      '空别名 [[旧页面标题|]] 与空锚点 [[旧页面标题#]]',
+      '带锚点和别名 [[旧页面标题#sec|别名]]',
+      '```md',
+      '代码块内 [[旧页面标题]] 不应被改写',
+      '```',
+    ].join('\n');
+    const srcResp = await env.app.request('/wiki/pages', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: '引用源页', content: sourceContent }),
+    });
+    const src = (await srcResp.json()) as { id: number; revision_count: number };
+
+    // User B has a page mentioning [[旧页面标题]]
+    const bSrcResp = await env.app.request('/wiki/pages', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${tokenB}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: 'B的页面', content: '跨租户 [[旧页面标题]] 不得修改' }),
+    });
+    const bSrc = (await bSrcResp.json()) as { id: number };
+
+    // Mark existing jobs succeeded so we can verify rename enqueues a new reindex job for source
+    const db = getDb();
+    db.prepare("UPDATE ingestion_jobs SET status = 'succeeded'").run();
+
+    // Rename target page
+    const renameResp = await env.app.request(`/wiki/pages/${target.id}`, {
+      method: 'PUT',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: '新页面标题' }),
+    });
+    expect(renameResp.status).toBe(200);
+
+    // 1. Alias recorded
+    const aliasRow = db
+      .prepare('SELECT alias_title FROM wiki_aliases WHERE user_id = ? AND page_id = ?')
+      .get(target.user_id, target.id) as { alias_title: string } | undefined;
+    expect(aliasRow?.alias_title).toBe('旧页面标题');
+
+    // 2. Source page rewritten cleanly including empty-suffix variants, code block untouched
+    const srcAfter = (await (
+      await env.app.request(`/wiki/pages/${src.id}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+    ).json()) as { content: string; revision_count: number };
+    expect(srcAfter.content).toContain('[[新页面标题]]');
+    expect(srcAfter.content).toContain('[[新页面标题|]]');
+    expect(srcAfter.content).toContain('[[新页面标题#]]');
+    expect(srcAfter.content).toContain('[[新页面标题#sec|别名]]');
+    expect(srcAfter.content).toContain('代码块内 [[旧页面标题]] 不应被改写');
+    expect(srcAfter.revision_count).toBe(src.revision_count + 1);
+
+    // 3. Source page reindex job enqueued
+    const srcJob = db
+      .prepare("SELECT * FROM ingestion_jobs WHERE entity_type = 'wiki' AND entity_id = ? AND status = 'pending'")
+      .get(src.id);
+    expect(srcJob).toBeDefined();
+
+    // 4. Tenant B untouched
+    const bAfter = (await (
+      await env.app.request(`/wiki/pages/${bSrc.id}`, {
+        headers: { Authorization: `Bearer ${tokenB}` },
+      })
+    ).json()) as { content: string };
+    expect(bAfter.content).toBe('跨租户 [[旧页面标题]] 不得修改');
+  });
+
+  it('re-indexes moved node and all descendants on moveWikiPage (BUG-13)', async () => {
+    const r = await (
+      await env.app.request('/wiki/pages', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: 'Root', content: 'r' }),
+      })
+    ).json() as { id: number };
+    const child = await (
+      await env.app.request('/wiki/pages', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: 'Child', content: 'c', parent_id: r.id }),
+      })
+    ).json() as { id: number };
+    const grand = await (
+      await env.app.request('/wiki/pages', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: 'Grand', content: 'g', parent_id: child.id }),
+      })
+    ).json() as { id: number };
+    const other = await (
+      await env.app.request('/wiki/pages', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: 'Other', content: 'o' }),
+      })
+    ).json() as { id: number };
+
+    const db = getDb();
+    db.prepare("UPDATE ingestion_jobs SET status = 'succeeded'").run();
+
+    const moveResp = await env.app.request(`/wiki/pages/${child.id}/move`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ target_parent_id: other.id, sort_order: 1 }),
+    });
+    expect(moveResp.status).toBe(200);
+
+    const grandAfter = (await (
+      await env.app.request(`/wiki/pages/${grand.id}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+    ).json()) as { path: string };
+    expect(grandAfter.path).toBe(`/${other.id}/${child.id}/${grand.id}/`);
+
+    const pendingIds = (
+      db
+        .prepare("SELECT entity_id FROM ingestion_jobs WHERE entity_type = 'wiki' AND status = 'pending'")
+        .all() as Array<{ entity_id: number }>
+    ).map((x) => x.entity_id);
+    expect(pendingIds).toContain(child.id);
+    expect(pendingIds).toContain(grand.id);
+  });
+
+  it('blocks vault symlink escape and path traversal (BUG-03)', () => {
+    const outsideFile = path.join(env.tmpDir, 'outside-secret.txt');
+    fs.writeFileSync(outsideFile, 'DO_NOT_OVERWRITE', 'utf8');
+
+    const userVault = path.join(config.resolvedVaultDir, '99');
+    fs.mkdirSync(userVault, { recursive: true });
+    const symlinkTarget = path.join(userVault, 'evil-link.md');
+    fs.symlinkSync(outsideFile, symlinkTarget);
+
+    expect(() => syncPageToVault(99, 'evil-link', 'Evil', 'pwned')).toThrow(/symlink|escape|traversal/i);
+    expect(fs.readFileSync(outsideFile, 'utf8')).toBe('DO_NOT_OVERWRITE');
+
+    expect(() => removePageFromVault(99, 'evil-link')).toThrow(/symlink|escape|traversal/i);
+    expect(fs.existsSync(outsideFile)).toBe(true);
+  });
+
+  it('persists visual links and enforces non-null unique constraint on wiki_links (BUG-06)', async () => {
+    const pResp = await env.app.request('/wiki/pages', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        title: '视觉双链页',
+        content: '包含图片 ![[visual:12/chart.jpg|系统图]] 与文本 [[目标页]]',
+      }),
+    });
+    expect(pResp.status).toBe(201);
+    const page = (await pResp.json()) as { id: number; user_id: number };
+
+    const db = getDb();
+    const visLink = db
+      .prepare("SELECT * FROM wiki_links WHERE source_page_id = ? AND link_type = 'visual'")
+      .get(page.id) as { target_title: string; alias: string; section_anchor: string } | undefined;
+    expect(visLink).toBeDefined();
+    expect(visLink?.target_title).toBe('12/chart.jpg');
+    expect(visLink?.alias).toBe('系统图');
+    expect(visLink?.section_anchor).toBe('');
+
+    const textLink = db
+      .prepare("SELECT alias, section_anchor FROM wiki_links WHERE source_page_id = ? AND link_type = 'wikilink'")
+      .get(page.id) as { alias: string | null; section_anchor: string | null };
+    expect(textLink.alias).toBe('');
+    expect(textLink.section_anchor).toBe('');
+
+    // SQLite unique constraint must reject duplicate empty-alias/anchor insert instead of silently allowing NULL != NULL
+    expect(() => {
+      db.prepare(`
+        INSERT INTO wiki_links(user_id, source_page_id, target_page_id, target_title, alias, link_type, section_anchor)
+        VALUES (?, ?, NULL, '目标页', '', 'wikilink', '')
+      `).run(page.user_id, page.id);
+    }).toThrow(/UNIQUE constraint failed/i);
+  });
+
+  it('escapes LIKE wildcards and excludes inline code/markdown links in unlinked-mentions (BUG-30/31)', async () => {
+    const targetResp = await env.app.request('/wiki/pages', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: '100%_test', content: 'target' }),
+    });
+    const target = (await targetResp.json()) as { id: number };
+
+    // False-positive wildcard page that should NOT match 100%_test
+    await env.app.request('/wiki/pages', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: 'WildcardFalse', content: 'Here is 1000Xtest string' }),
+    });
+
+    // Inline code and markdown link only page for another target 'Vector'
+    const vecResp = await env.app.request('/wiki/pages', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: 'Vector', content: 'vector page' }),
+    });
+    const vecPage = (await vecResp.json()) as { id: number };
+
+    const noisePageResp = await env.app.request('/wiki/pages', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        title: 'NoiseOnly',
+        content: 'Use `Vector` inline or [Vector](https://example.com) link or [[Vector|alias]] here.',
+      }),
+    });
+    const noisePage = (await noisePageResp.json()) as { id: number };
+
+    const validPageResp = await env.app.request('/wiki/pages', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        title: 'ValidMention',
+        content: 'We study vector retrieval in detail.',
+      }),
+    });
+    const validPage = (await validPageResp.json()) as { id: number };
+
+    // Check BUG-30 LIKE escape
+    const wildMentions = (await (
+      await env.app.request(`/wiki/pages/${target.id}/unlinked-mentions`, {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+    ).json()) as Array<{ page_id: number }>;
+    expect(wildMentions.length).toBe(0);
+
+    // Check BUG-31 inline-code / markdown link exclusion + case-insensitive plain match
+    const vecMentions = (await (
+      await env.app.request(`/wiki/pages/${vecPage.id}/unlinked-mentions`, {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+    ).json()) as Array<{ page_id: number }>;
+    expect(vecMentions.some((m) => m.page_id === noisePage.id)).toBe(false);
+    expect(vecMentions.some((m) => m.page_id === validPage.id)).toBe(true);
   });
 });

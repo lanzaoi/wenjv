@@ -61,69 +61,49 @@ export function initTables(db: Database.Database): void {
       is_verified BOOLEAN NOT NULL DEFAULT 0
     );
 
-    CREATE TABLE IF NOT EXISTS file_uploads (
+    -- Schema v2: Unified 3-in-1 resources (file / note / link)
+    CREATE TABLE IF NOT EXISTS resources (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      type VARCHAR(16) NOT NULL CHECK (type IN ('file', 'note', 'link')),
+      title VARCHAR NOT NULL,
       filename VARCHAR,
       original_filename VARCHAR,
       file_path VARCHAR,
-      file_url VARCHAR,
-      status VARCHAR,
+      source_url VARCHAR,
+      content_text TEXT,
       content_type VARCHAR,
-      error_message VARCHAR,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      updated_at DATETIME,
-      user_id INTEGER,
-      tags TEXT DEFAULT '[]',
-      FOREIGN KEY(user_id) REFERENCES users (id)
-    );
-
-    CREATE TABLE IF NOT EXISTS links (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      url VARCHAR,
-      title VARCHAR,
       favicon VARCHAR,
-      status VARCHAR,
+      status VARCHAR(16) NOT NULL DEFAULT 'pending',
       error_message VARCHAR,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      updated_at DATETIME,
-      user_id INTEGER,
-      tags TEXT DEFAULT '[]',
-      FOREIGN KEY(user_id) REFERENCES users (id)
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY(user_id) REFERENCES users (id) ON DELETE CASCADE
     );
 
-    CREATE TABLE IF NOT EXISTS notes (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      url VARCHAR,
-      title VARCHAR,
-      filename VARCHAR,
-      file_path VARCHAR,
-      status VARCHAR,
-      error_message VARCHAR,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      updated_at DATETIME,
-      user_id INTEGER,
-      tags TEXT DEFAULT '[]',
-      FOREIGN KEY(user_id) REFERENCES users (id)
-    );
+    CREATE INDEX IF NOT EXISTS ix_resources_user_type ON resources(user_id, type);
+    CREATE INDEX IF NOT EXISTS ix_resources_user_status ON resources(user_id, status);
+    CREATE INDEX IF NOT EXISTS ix_resources_user_filename ON resources(user_id, filename);
 
-    CREATE TABLE IF NOT EXISTS ingestion_jobs (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      job_type VARCHAR NOT NULL,
-      resource_id INTEGER NOT NULL,
+    -- Schema v2: Unified multimodal visual assets (resource / wiki / chat)
+    CREATE TABLE IF NOT EXISTS assets (
+      id VARCHAR(64) PRIMARY KEY,
       user_id INTEGER NOT NULL,
-      user_email VARCHAR NOT NULL,
-      payload VARCHAR NOT NULL,
-      status VARCHAR NOT NULL,
-      attempts INTEGER NOT NULL DEFAULT 0,
-      max_attempts INTEGER NOT NULL DEFAULT 3,
-      last_error VARCHAR,
+      owner_type VARCHAR(16) NOT NULL CHECK (owner_type IN ('resource', 'wiki', 'chat')),
+      owner_id VARCHAR(128) NOT NULL,
+      filename VARCHAR NOT NULL,
+      file_path VARCHAR NOT NULL,
+      mime_type VARCHAR NOT NULL,
+      size INTEGER NOT NULL DEFAULT 0,
+      caption TEXT NOT NULL DEFAULT '',
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      updated_at DATETIME,
-      started_at DATETIME,
-      finished_at DATETIME,
-      FOREIGN KEY(user_id) REFERENCES users (id)
+      FOREIGN KEY(user_id) REFERENCES users (id) ON DELETE CASCADE
     );
 
+    CREATE INDEX IF NOT EXISTS ix_assets_owner ON assets(user_id, owner_type, owner_id);
+    CREATE INDEX IF NOT EXISTS ix_assets_path ON assets(file_path);
+
+    -- Wiki core tables (tags normalized into tags + entity_tags)
     CREATE TABLE IF NOT EXISTS wiki_pages (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       user_id INTEGER NOT NULL,
@@ -135,13 +115,12 @@ export function initTables(db: Database.Database): void {
       summary VARCHAR(512) NOT NULL DEFAULT '',
       sort_order INTEGER NOT NULL DEFAULT 0,
       icon VARCHAR(64) NOT NULL DEFAULT '',
-      tags VARCHAR NOT NULL DEFAULT '[]',
       index_status VARCHAR(16) NOT NULL DEFAULT 'indexed',
       revision_count INTEGER NOT NULL DEFAULT 1,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       CONSTRAINT uq_wiki_user_slug UNIQUE (user_id, slug),
-      FOREIGN KEY(user_id) REFERENCES users (id),
+      FOREIGN KEY(user_id) REFERENCES users (id) ON DELETE CASCADE,
       FOREIGN KEY(parent_id) REFERENCES wiki_pages (id)
     );
 
@@ -151,15 +130,18 @@ export function initTables(db: Database.Database): void {
       source_page_id INTEGER NOT NULL,
       target_page_id INTEGER,
       target_title VARCHAR(255) NOT NULL,
-      alias VARCHAR(255),
+      alias VARCHAR(255) NOT NULL DEFAULT '',
       link_type VARCHAR(16) NOT NULL,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      section_anchor TEXT,
-      CONSTRAINT uq_wiki_link UNIQUE (user_id, source_page_id, target_title, alias, link_type),
-      FOREIGN KEY(user_id) REFERENCES users (id),
+      section_anchor TEXT NOT NULL DEFAULT '',
+      CONSTRAINT uq_wiki_link UNIQUE (user_id, source_page_id, target_title, alias, section_anchor, link_type),
+      FOREIGN KEY(user_id) REFERENCES users (id) ON DELETE CASCADE,
       FOREIGN KEY(source_page_id) REFERENCES wiki_pages (id) ON DELETE CASCADE,
       FOREIGN KEY(target_page_id) REFERENCES wiki_pages (id) ON DELETE CASCADE
     );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_wiki_link_nonnull
+      ON wiki_links(user_id, source_page_id, target_title, COALESCE(alias, ''), COALESCE(section_anchor, ''), link_type);
 
     CREATE TABLE IF NOT EXISTS wiki_revisions (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -171,7 +153,7 @@ export function initTables(db: Database.Database): void {
       char_count INTEGER NOT NULL,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY(page_id) REFERENCES wiki_pages (id) ON DELETE CASCADE,
-      FOREIGN KEY(user_id) REFERENCES users (id)
+      FOREIGN KEY(user_id) REFERENCES users (id) ON DELETE CASCADE
     );
 
     CREATE TABLE IF NOT EXISTS wiki_aliases (
@@ -182,8 +164,75 @@ export function initTables(db: Database.Database): void {
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       CONSTRAINT uq_wiki_alias_user_title UNIQUE (user_id, alias_title),
       FOREIGN KEY(page_id) REFERENCES wiki_pages (id) ON DELETE CASCADE,
-      FOREIGN KEY(user_id) REFERENCES users (id)
+      FOREIGN KEY(user_id) REFERENCES users (id) ON DELETE CASCADE
     );
+
+    -- Schema v2: Relational tags dictionary + polymorphic entity_tags
+    CREATE TABLE IF NOT EXISTS tags (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      name VARCHAR(64) NOT NULL,
+      color VARCHAR(16) NOT NULL DEFAULT '',
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      CONSTRAINT uq_tags_user_name UNIQUE (user_id, name),
+      FOREIGN KEY(user_id) REFERENCES users (id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS entity_tags (
+      tag_id INTEGER NOT NULL,
+      user_id INTEGER NOT NULL,
+      entity_type VARCHAR(16) NOT NULL CHECK (entity_type IN ('resource', 'wiki')),
+      entity_id INTEGER NOT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (tag_id, entity_type, entity_id),
+      FOREIGN KEY(tag_id) REFERENCES tags (id) ON DELETE CASCADE,
+      FOREIGN KEY(user_id) REFERENCES users (id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS ix_entity_tags_lookup ON entity_tags(user_id, entity_type, entity_id);
+
+    -- Schema v2: Authoritative chunk table (single source of truth for FTS5 & LanceDB hydration)
+    CREATE TABLE IF NOT EXISTS chunks (
+      id VARCHAR PRIMARY KEY,
+      user_id INTEGER NOT NULL,
+      entity_type VARCHAR(16) NOT NULL CHECK (entity_type IN ('resource', 'wiki')),
+      entity_id INTEGER NOT NULL,
+      resource_type VARCHAR(16) NOT NULL CHECK (resource_type IN ('file', 'note', 'link', 'wiki')),
+      chunk_order INTEGER NOT NULL,
+      page_number INTEGER NOT NULL DEFAULT 1,
+      header_path TEXT NOT NULL DEFAULT '',
+      title VARCHAR NOT NULL DEFAULT '',
+      source VARCHAR NOT NULL DEFAULT '',
+      content TEXT NOT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY(user_id) REFERENCES users (id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS ix_chunks_entity ON chunks(user_id, entity_type, entity_id, chunk_order);
+    CREATE INDEX IF NOT EXISTS ix_chunks_source ON chunks(user_id, resource_type);
+
+    -- Unified persistent ingestion jobs
+    CREATE TABLE IF NOT EXISTS ingestion_jobs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      entity_type VARCHAR(16) NOT NULL CHECK (entity_type IN ('resource', 'wiki')),
+      entity_id INTEGER NOT NULL,
+      user_id INTEGER NOT NULL,
+      user_email VARCHAR NOT NULL,
+      payload VARCHAR NOT NULL,
+      status VARCHAR NOT NULL,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      max_attempts INTEGER NOT NULL DEFAULT 3,
+      last_error VARCHAR,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME,
+      started_at DATETIME,
+      finished_at DATETIME,
+      FOREIGN KEY(user_id) REFERENCES users (id) ON DELETE CASCADE
+    );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_ingestion_jobs_pending
+      ON ingestion_jobs(entity_type, entity_id, user_id)
+      WHERE status = 'pending';
 
     CREATE TABLE IF NOT EXISTS query_logs (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -220,21 +269,6 @@ export function initTables(db: Database.Database): void {
       result_json TEXT NOT NULL,
       expires_at DATETIME NOT NULL,
       PRIMARY KEY (query_hash, user_id)
-    );
-
-    CREATE TABLE IF NOT EXISTS chunk_mapping (
-      chunk_id VARCHAR PRIMARY KEY,
-      chunk_group VARCHAR NOT NULL,
-      chunk_order INTEGER NOT NULL,
-      resource_id VARCHAR
-    );
-
-    CREATE TABLE IF NOT EXISTS doc_embeddings (
-      resource_id VARCHAR PRIMARY KEY,
-      embedding BLOB NOT NULL,
-      dims INTEGER NOT NULL,
-      chunk_count INTEGER NOT NULL,
-      updated_at DATETIME
     );
   `);
 

@@ -8,10 +8,11 @@ import { config } from './config.js';
 import { getDb } from './db/index.js';
 import { startJobRunner } from './services/jobs.js';
 import { authRouter } from './routes/auth.js';
-import { filesRouter } from './routes/files.js';
+import { resourcesRouter } from './routes/resources.js';
+import { searchRouter } from './routes/search.js';
+import { tagsRouter } from './routes/tags.js';
+import { assetsRouter } from './routes/assets.js';
 import { jobsRouter } from './routes/jobs.js';
-import { linksRouter } from './routes/links.js';
-import { documentsRouter } from './routes/documents.js';
 import { chatRouter } from './routes/chat.js';
 import { wikiRouter } from './routes/wiki.js';
 import { adminRouter } from './routes/admin.js';
@@ -88,23 +89,24 @@ export function createApp(): Hono {
     return c.json(res);
   });
 
-  // Mount routers
+  // Mount unified Schema v2 routers
   app.route('/auth', authRouter);
-  app.route('/file', filesRouter);
+  app.route('/resources', resourcesRouter);
+  app.route('/search', searchRouter);
+  app.route('/tags', tagsRouter);
+  app.route('/assets', assetsRouter);
   app.route('/jobs', jobsRouter);
-  app.route('/links', linksRouter);
-
-  // Both prefixed and unprefixed for backward compatibility
-  app.route('/documents', documentsRouter);
-  app.route('/api/documents', documentsRouter);
-
   app.route('/chat', chatRouter);
-  app.route('/api/chat', chatRouter);
-
   app.route('/wiki', wikiRouter);
-  app.route('/api/wiki', wikiRouter);
-
   app.route('/admin', adminRouter);
+
+  // Prefix-safe /api aliases for direct API clients without proxy path rewrite
+  app.route('/api/resources', resourcesRouter);
+  app.route('/api/search', searchRouter);
+  app.route('/api/tags', tagsRouter);
+  app.route('/api/assets', assetsRouter);
+  app.route('/api/chat', chatRouter);
+  app.route('/api/wiki', wikiRouter);
 
   return app;
 }

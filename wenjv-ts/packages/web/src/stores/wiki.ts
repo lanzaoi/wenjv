@@ -162,6 +162,7 @@ export const useWikiStore = defineStore('wiki', {
         title: this.currentPage.title,
         content: this.currentPage.content,
         icon: this.currentPage.icon,
+        expected_rev_no: this.currentPage.revision_count,
       };
 
       this.saving = true;

@@ -70,7 +70,7 @@ describe('Golden Master Integration (G2 & Walking Skeleton)', () => {
       const fd = new FormData();
       fd.append('file', new Blob([fileBuffer]), filename);
 
-      const upResp = await env.app.request('/file/upload', {
+      const upResp = await env.app.request('/resources/files', {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}` },
         body: fd,
@@ -97,7 +97,7 @@ describe('Golden Master Integration (G2 & Walking Skeleton)', () => {
     // Verify all uploaded files reached 'finished' status
     const db = getDb();
     for (const fileId of uploadedIds) {
-      const row = db.prepare('SELECT status FROM file_uploads WHERE id = ?').get(fileId) as { status: string };
+      const row = db.prepare('SELECT status FROM resources WHERE id = ?').get(fileId) as { status: string };
       expect(row.status).toBe('finished');
     }
 
@@ -111,7 +111,7 @@ describe('Golden Master Integration (G2 & Walking Skeleton)', () => {
     ];
 
     for (const tq of testQueries) {
-      const sResp = await env.app.request('/documents/search', {
+      const sResp = await env.app.request('/search', {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${token}`,

@@ -1,5 +1,4 @@
 import { Hono } from 'hono';
-import { html } from 'hono/html';
 import { getDb } from '../db/index.js';
 import { authMiddleware, type AuthUser } from '../auth/middleware.js';
 
@@ -48,9 +47,17 @@ adminRouter.get('/stats', authMiddleware, (c) => {
     .get() as { cnt: number } | undefined;
   const last24h = last24hRow?.cnt || 0;
 
-  const fileCount = (db.prepare('SELECT COUNT(*) as c FROM file_uploads').get() as { c: number }).c;
-  const noteCount = (db.prepare('SELECT COUNT(*) as c FROM notes').get() as { c: number }).c;
-  const linkCount = (db.prepare('SELECT COUNT(*) as c FROM links').get() as { c: number }).c;
+  const resourceCountsRaw = db
+    .prepare('SELECT type, COUNT(*) as c FROM resources GROUP BY type')
+    .all() as Array<{ type: string; c: number }>;
+  const byType: Record<string, number> = { file: 0, note: 0, link: 0 };
+  for (const r of resourceCountsRaw) {
+    byType[r.type] = Number(r.c || 0);
+  }
+
+  const chunkCount = (db.prepare('SELECT COUNT(*) as c FROM chunks').get() as { c: number }).c;
+  const assetCount = (db.prepare('SELECT COUNT(*) as c FROM assets').get() as { c: number }).c;
+  const tagCount = (db.prepare('SELECT COUNT(*) as c FROM tags').get() as { c: number }).c;
   const wikiCount = (db.prepare('SELECT COUNT(*) as c FROM wiki_pages').get() as { c: number }).c;
   const userCount = (db.prepare('SELECT COUNT(*) as c FROM users').get() as { c: number }).c;
   const apiCounts = db.prepare('SELECT provider, call_type, call_count, last_reset FROM api_call_counts').all();
@@ -66,9 +73,13 @@ adminRouter.get('/stats', authMiddleware, (c) => {
     last_24h_queries: last24h,
     counts: {
       users: userCount,
-      files: fileCount,
-      notes: noteCount,
-      links: linkCount,
+      resources: byType['file']! + byType['note']! + byType['link']!,
+      files: byType['file'],
+      notes: byType['note'],
+      links: byType['link'],
+      chunks: chunkCount,
+      assets: assetCount,
+      tags: tagCount,
       wiki_pages: wikiCount,
       queries: total,
     },

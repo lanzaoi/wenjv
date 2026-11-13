@@ -2,47 +2,41 @@ import fs from 'node:fs';
 import * as lancedb from '@lancedb/lancedb';
 import { config } from '../config.js';
 
+export type AssetOwnerType = 'resource' | 'wiki' | 'chat';
+
 export interface VisualVectorItem {
   id: string;
   vector: number[];
-  page_content: string;
-  image_path: string;
-  source: string;
-  page: string;
-  title: string;
-  filename: string;
-  belongs_to: string;
-  user_id: string;
-  file_id: string;
-  resource_id: string;
-  source_type: string;
+  user_id: string | number;
+  owner_type: AssetOwnerType;
+  owner_id: string | number;
 }
 
-export interface VisualSearchResult {
+export interface VisualVectorSearchResult {
   id: string;
-  page_content: string;
-  image_path: string;
-  source: string;
-  page: string;
-  title: string;
-  filename: string;
-  belongs_to: string;
   user_id: string;
-  file_id: string;
-  resource_id: string;
-  source_type: string;
-  score?: number | undefined;
-  _distance?: number | undefined;
+  owner_type: AssetOwnerType;
+  owner_id: string;
+  score: number;
+  _distance: number;
 }
 
 export interface VisualSearchOptions {
   limit?: number | undefined;
   userId?: string | number | null | undefined;
-  belongsTo?: string | null | undefined;
-  sourceType?: string | null | undefined;
+  ownerType?: AssetOwnerType | null | undefined;
 }
 
-export class VisualStore {
+function escapeSqlString(v: string | number): string {
+  return String(v).replace(/'/g, "''");
+}
+
+/**
+ * Slim LanceDB visual vector store (`visual_vectors`).
+ * Stores only SigLIP2 vector + owner foreign keys; metadata and file paths
+ * are hydrated from SQLite `assets`.
+ */
+export class VisualVectorStore {
   private db: lancedb.Connection | null = null;
   private table: lancedb.Table | null = null;
   private lanceDir: string;
@@ -64,52 +58,37 @@ export class VisualStore {
     }
 
     this.db = await lancedb.connect(this.lanceDir);
+    const tableName = config.VISUAL_VECTOR_STORE_COLLECTION_NAME || 'visual_vectors';
     const tableNames = await this.db.tableNames();
 
-    if (tableNames.includes('visual_store')) {
-      this.table = await this.db.openTable('visual_store');
+    if (tableNames.includes(tableName)) {
+      this.table = await this.db.openTable(tableName);
     } else {
       const seed: Record<string, unknown>[] = [
         {
           id: '__seed__',
           vector: new Array(768).fill(0),
-          page_content: '',
-          image_path: '',
-          source: '',
-          page: '',
-          title: '',
-          filename: '',
-          belongs_to: '',
           user_id: '',
-          file_id: '',
-          resource_id: '',
-          source_type: '',
+          owner_type: 'resource',
+          owner_id: '',
         },
       ];
-      this.table = await this.db.createTable('visual_store', seed);
+      this.table = await this.db.createTable(tableName, seed);
       await this.table.delete("id = '__seed__'");
     }
   }
 
-  public async addDocuments(docs: VisualVectorItem[]): Promise<void> {
-    if (docs.length === 0) return;
+  public async addVectors(items: VisualVectorItem[]): Promise<void> {
+    if (items.length === 0) return;
     await this.init();
     if (!this.table) throw new Error('Visual store not initialized');
 
-    const records = docs.map((d) => ({
-      id: d.id,
-      vector: d.vector,
-      page_content: d.page_content || '',
-      image_path: d.image_path || '',
-      source: d.source || '',
-      page: d.page || '',
-      title: d.title || '',
-      filename: d.filename || '',
-      belongs_to: d.belongs_to || '',
-      user_id: String(d.user_id || ''),
-      file_id: String(d.file_id || ''),
-      resource_id: String(d.resource_id || ''),
-      source_type: String(d.source_type || ''),
+    const records = items.map((item) => ({
+      id: item.id,
+      vector: item.vector,
+      user_id: String(item.user_id),
+      owner_type: item.owner_type,
+      owner_id: String(item.owner_id),
     }));
 
     await this.table.add(records);
@@ -118,62 +97,45 @@ export class VisualStore {
   public async search(
     queryVector: number[],
     options: VisualSearchOptions = {}
-  ): Promise<VisualSearchResult[]> {
+  ): Promise<VisualVectorSearchResult[]> {
     await this.init();
     if (!this.table) return [];
 
-    const limit = options.limit || 5;
-    const filterConditions: string[] = [];
+    const limit = options.limit ?? 5;
+    const filterParts: string[] = [];
 
     if (options.userId !== undefined && options.userId !== null && options.userId !== '') {
-      const uid = String(options.userId).replace(/'/g, "''");
-      if (options.belongsTo) {
-        const belongs = options.belongsTo.replace(/'/g, "''");
-        filterConditions.push(`(user_id = '${uid}' OR belongs_to = '${belongs}')`);
-      } else {
-        filterConditions.push(`user_id = '${uid}'`);
-      }
-    } else if (options.belongsTo) {
-      filterConditions.push(`belongs_to = '${options.belongsTo.replace(/'/g, "''")}'`);
+      filterParts.push(`user_id = '${escapeSqlString(options.userId)}'`);
+    }
+    if (options.ownerType) {
+      filterParts.push(`owner_type = '${escapeSqlString(options.ownerType)}'`);
     }
 
-    if (options.sourceType) {
-      filterConditions.push(`source_type = '${options.sourceType.replace(/'/g, "''")}'`);
-    }
-
-    const filterExpr = filterConditions.join(' AND ');
     let searchBuilder = this.table.search(queryVector).limit(limit);
-
-    if (filterExpr) {
-      searchBuilder = searchBuilder.where(filterExpr);
+    if (filterParts.length > 0) {
+      searchBuilder = searchBuilder.where(filterParts.join(' AND '));
     }
 
     const rows = (await searchBuilder.toArray()) as Array<Record<string, unknown>>;
-    return rows.map((row) => ({
-      id: String(row['id'] || ''),
-      page_content: String(row['page_content'] || ''),
-      image_path: String(row['image_path'] || ''),
-      source: String(row['source'] || ''),
-      page: String(row['page'] || ''),
-      title: String(row['title'] || ''),
-      filename: String(row['filename'] || ''),
-      belongs_to: String(row['belongs_to'] || ''),
-      user_id: String(row['user_id'] || ''),
-      file_id: String(row['file_id'] || ''),
-      resource_id: String(row['resource_id'] || ''),
-      source_type: String(row['source_type'] || ''),
-      score: typeof row['_distance'] === 'number' ? row['_distance'] : 0,
-      _distance: typeof row['_distance'] === 'number' ? row['_distance'] : 0,
-    }));
+    return rows.map((row) => {
+      const dist = typeof row['_distance'] === 'number' ? row['_distance'] : 1.0;
+      return {
+        id: String(row['id'] || ''),
+        user_id: String(row['user_id'] || ''),
+        owner_type: String(row['owner_type'] || 'resource') as AssetOwnerType,
+        owner_id: String(row['owner_id'] || ''),
+        score: 1.0 / (1.0 + dist),
+        _distance: dist,
+      };
+    });
   }
 
-  public async deleteByResourceId(resourceId: string, userId?: string | number): Promise<void> {
+  public async deleteById(assetId: string, userId?: string | number): Promise<void> {
     await this.init();
     if (!this.table) return;
-    const escaped = resourceId.replace(/'/g, "''");
-    let filter = `(resource_id = '${escaped}' OR file_id = '${escaped}')`;
+    let filter = `id = '${escapeSqlString(assetId)}'`;
     if (userId !== undefined && userId !== null) {
-      filter += ` AND user_id = '${String(userId).replace(/'/g, "''")}'`;
+      filter += ` AND user_id = '${escapeSqlString(userId)}'`;
     }
     try {
       await this.table.delete(filter);
@@ -182,13 +144,12 @@ export class VisualStore {
     }
   }
 
-  public async deleteByFilename(filename: string, belongsTo?: string | null): Promise<void> {
+  public async deleteByOwner(ownerType: AssetOwnerType, ownerId: string | number, userId?: string | number): Promise<void> {
     await this.init();
     if (!this.table) return;
-    const escaped = filename.replace(/'/g, "''");
-    let filter = `filename = '${escaped}'`;
-    if (belongsTo) {
-      filter += ` AND belongs_to = '${belongsTo.replace(/'/g, "''")}'`;
+    let filter = `owner_type = '${escapeSqlString(ownerType)}' AND owner_id = '${escapeSqlString(ownerId)}'`;
+    if (userId !== undefined && userId !== null) {
+      filter += ` AND user_id = '${escapeSqlString(userId)}'`;
     }
     try {
       await this.table.delete(filter);
@@ -198,16 +159,16 @@ export class VisualStore {
   }
 }
 
-let _visualStore: VisualStore | null = null;
+let _visualStore: VisualVectorStore | null = null;
 
 export function resetVisualStore(): void {
   _visualStore = null;
 }
 
-export function getVisualStore(lanceDir?: string): VisualStore {
+export function getVisualStore(lanceDir?: string): VisualVectorStore {
   const targetDir = lanceDir || config.resolvedLanceDir;
   if (!_visualStore || _visualStore.getLanceDir() !== targetDir) {
-    _visualStore = new VisualStore(targetDir);
+    _visualStore = new VisualVectorStore(targetDir);
   }
   return _visualStore;
 }

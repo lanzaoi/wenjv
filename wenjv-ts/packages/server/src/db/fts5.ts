@@ -1,36 +1,37 @@
 import type Database from 'better-sqlite3';
+import type { ChunkEntityType, ChunkResourceType } from './chunks.js';
+
+export interface EntityFilterRef {
+  entity_type: ChunkEntityType;
+  entity_id: number;
+}
 
 export interface FtsMatchRow {
   chunk_id: string;
+  user_id: number;
+  entity_type: ChunkEntityType;
+  entity_id: number;
+  resource_type: ChunkResourceType;
+  chunk_order: number;
+  page_number: number;
+  header_path: string;
   title: string;
-  filename: string;
-  page_content: string;
-  user_id: string | null;
-  belongs_to: string | null;
-  source_type: string | null;
-  link_id: string | null;
-  resource_id?: string | null;
+  source: string;
+  content: string;
   bm25_score: number;
 }
 
-export interface FtsInsertRow {
-  chunk_id: string;
-  title?: string | null;
-  filename?: string | null;
-  page_content?: string | null;
-  user_id?: string | number | null;
-  belongs_to?: string | null;
-  source_type?: string | null;
-  link_id?: string | null;
-  resource_id?: string | null;
-}
-
 export interface MatchFts5Options {
-  userId?: number | string | null | undefined;
-  belongsTo?: string | null | undefined;
+  userId?: number | null | undefined;
   limit?: number | undefined;
   includeSources?: string[] | null | undefined;
-  sourceType?: string | null | undefined;
+  resourceType?: ChunkResourceType | null | undefined;
+  entityType?: ChunkEntityType | null | undefined;
+  entityRefs?: EntityFilterRef[] | null | undefined;
+}
+
+function escapeLikePattern(term: string): string {
+  return term.replace(/[\\%_]/g, '\\$&');
 }
 
 export function sanitizeFtsQuery(text: string): string {
@@ -69,55 +70,77 @@ export function sanitizeFtsQuery(text: string): string {
   return resultParts.join(' AND ');
 }
 
+/**
+ * Create external-content FTS5 virtual table bound to `chunks` + sync triggers.
+ * Eliminates dual-write drift and duplicated text storage.
+ */
 export function createFts5Table(db: Database.Database): void {
   db.exec(`
     CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
-      chunk_id UNINDEXED,
       title,
-      filename,
-      page_content,
-      user_id UNINDEXED,
-      belongs_to UNINDEXED,
-      source_type UNINDEXED,
-      link_id UNINDEXED,
-      resource_id UNINDEXED,
+      source,
+      content,
+      content='chunks',
+      content_rowid='rowid',
       tokenize='trigram'
     );
+
+    CREATE TRIGGER IF NOT EXISTS chunks_ai AFTER INSERT ON chunks BEGIN
+      INSERT INTO chunks_fts(rowid, title, source, content)
+      VALUES (new.rowid, new.title, new.source, new.content);
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS chunks_ad AFTER DELETE ON chunks BEGIN
+      INSERT INTO chunks_fts(chunks_fts, rowid, title, source, content)
+      VALUES ('delete', old.rowid, old.title, old.source, old.content);
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS chunks_au AFTER UPDATE ON chunks BEGIN
+      INSERT INTO chunks_fts(chunks_fts, rowid, title, source, content)
+      VALUES ('delete', old.rowid, old.title, old.source, old.content);
+      INSERT INTO chunks_fts(rowid, title, source, content)
+      VALUES (new.rowid, new.title, new.source, new.content);
+    END;
   `);
 }
 
-export function insertFts5(db: Database.Database, row: FtsInsertRow): void {
-  insertFts5Batch(db, [row]);
-}
-
-export function insertFts5Batch(db: Database.Database, rows: FtsInsertRow[]): void {
-  if (rows.length === 0) return;
-
-  const stmt = db.prepare(`
-    INSERT INTO chunks_fts(
-      chunk_id, title, filename, page_content,
-      user_id, belongs_to, source_type, link_id, resource_id
-    )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `);
-
-  const runBatch = db.transaction((items: FtsInsertRow[]) => {
-    for (const r of items) {
-      stmt.run(
-        r.chunk_id,
-        r.title || '',
-        r.filename || '',
-        r.page_content || '',
-        r.user_id !== undefined && r.user_id !== null ? String(r.user_id) : null,
-        r.belongs_to || '',
-        r.source_type !== undefined && r.source_type !== null ? String(r.source_type) : '',
-        r.link_id !== undefined && r.link_id !== null ? String(r.link_id) : null,
-        r.resource_id !== undefined && r.resource_id !== null ? String(r.resource_id) : null
-      );
+function appendCommonFilters(
+  whereParts: string[],
+  params: (string | number)[],
+  options: MatchFts5Options
+): boolean {
+  if (options.userId !== undefined && options.userId !== null) {
+    whereParts.push('c.user_id = ?');
+    params.push(options.userId);
+  }
+  if (options.entityType) {
+    whereParts.push('c.entity_type = ?');
+    params.push(options.entityType);
+  }
+  if (options.resourceType) {
+    whereParts.push('c.resource_type = ?');
+    params.push(options.resourceType);
+  }
+  if (options.includeSources && options.includeSources.length > 0) {
+    const cleanSources = options.includeSources.filter(Boolean).map(String);
+    if (cleanSources.length > 0) {
+      const marks = cleanSources.map(() => '?').join(',');
+      whereParts.push(`(c.source IN (${marks}) OR c.title IN (${marks}))`);
+      params.push(...cleanSources, ...cleanSources);
     }
-  });
-
-  runBatch(rows);
+  }
+  if (options.entityRefs !== undefined && options.entityRefs !== null) {
+    if (options.entityRefs.length === 0) {
+      return false;
+    }
+    const refClauses: string[] = [];
+    for (const ref of options.entityRefs) {
+      refClauses.push('(c.entity_type = ? AND c.entity_id = ?)');
+      params.push(ref.entity_type, ref.entity_id);
+    }
+    whereParts.push('(' + refClauses.join(' OR ') + ')');
+  }
+  return true;
 }
 
 export function matchFts5(
@@ -125,50 +148,25 @@ export function matchFts5(
   prompt: string,
   options: MatchFts5Options = {}
 ): FtsMatchRow[] {
-  const {
-    userId,
-    belongsTo,
-    limit = 50,
-    includeSources,
-    sourceType,
-  } = options;
-
+  const limit = options.limit ?? 50;
   const terms = sanitizeFtsQuery(prompt);
   let rows: FtsMatchRow[] = [];
 
   if (terms) {
     const whereParts: string[] = ['chunks_fts MATCH ?'];
     const params: (string | number)[] = [terms];
-
-    if (userId !== undefined && userId !== null) {
-      whereParts.push('user_id = ?');
-      params.push(String(userId));
-    }
-    if (belongsTo !== undefined && belongsTo !== null) {
-      whereParts.push('belongs_to = ?');
-      params.push(belongsTo);
-    }
-    if (sourceType !== undefined && sourceType !== null) {
-      whereParts.push('source_type = ?');
-      params.push(String(sourceType));
-    }
-    if (includeSources && includeSources.length > 0) {
-      const cleanSources = includeSources.filter(Boolean).map(String);
-      if (cleanSources.length > 0) {
-        const paramMarks = cleanSources.map(() => '?').join(',');
-        whereParts.push(`(filename IN (${paramMarks}) OR title IN (${paramMarks}))`);
-        params.push(...cleanSources, ...cleanSources);
-      }
+    if (!appendCommonFilters(whereParts, params, options)) {
+      return [];
     }
 
-    const where = whereParts.join(' AND ');
     const sql = `
-      SELECT chunk_id, title, filename, page_content, user_id,
-             belongs_to, source_type, link_id, resource_id,
-             rank AS bm25_score
-      FROM chunks_fts
-      WHERE ${where}
-      ORDER BY rank
+      SELECT c.id AS chunk_id, c.user_id, c.entity_type, c.entity_id, c.resource_type,
+             c.chunk_order, c.page_number, c.header_path, c.title, c.source, c.content,
+             f.rank AS bm25_score
+      FROM chunks_fts f
+      JOIN chunks c ON c.rowid = f.rowid
+      WHERE ${whereParts.join(' AND ')}
+      ORDER BY f.rank
       LIMIT ?
     `;
     params.push(limit);
@@ -180,7 +178,7 @@ export function matchFts5(
     }
   }
 
-  // Fallback to LIKE substring search if FTS5 matched nothing
+  // Fallback to LIKE substring search when trigram FTS5 returns nothing (e.g. 1-2 char CJK)
   if (rows.length === 0 && prompt && prompt.trim().length > 0) {
     const cleaned = prompt.replace(/[^\p{L}\p{N}_\u4e00-\u9fff]/gu, ' ');
     const cleanedWords = cleaned.split(/\s+/).map((w) => w.trim()).filter((w) => w.length > 0);
@@ -191,39 +189,22 @@ export function matchFts5(
 
       const termConditions: string[] = [];
       for (const w of cleanedWords.slice(0, 5)) {
-        termConditions.push('(page_content LIKE ? OR title LIKE ? OR filename LIKE ?)');
-        fallbackParams.push(`%${w}%`, `%${w}%`, `%${w}%`);
+        const pat = `%${escapeLikePattern(w)}%`;
+        termConditions.push("(c.content LIKE ? ESCAPE '\\' OR c.title LIKE ? ESCAPE '\\' OR c.source LIKE ? ESCAPE '\\')");
+        fallbackParams.push(pat, pat, pat);
       }
       fallbackWhere.push('(' + termConditions.join(' OR ') + ')');
 
-      if (userId !== undefined && userId !== null) {
-        fallbackWhere.push('user_id = ?');
-        fallbackParams.push(String(userId));
-      }
-      if (belongsTo !== undefined && belongsTo !== null) {
-        fallbackWhere.push('belongs_to = ?');
-        fallbackParams.push(belongsTo);
-      }
-      if (sourceType !== undefined && sourceType !== null) {
-        fallbackWhere.push('source_type = ?');
-        fallbackParams.push(String(sourceType));
-      }
-      if (includeSources && includeSources.length > 0) {
-        const cleanSources = includeSources.filter(Boolean).map(String);
-        if (cleanSources.length > 0) {
-          const paramMarks = cleanSources.map(() => '?').join(',');
-          fallbackWhere.push(`(filename IN (${paramMarks}) OR title IN (${paramMarks}))`);
-          fallbackParams.push(...cleanSources, ...cleanSources);
-        }
+      if (!appendCommonFilters(fallbackWhere, fallbackParams, options)) {
+        return [];
       }
 
-      const fWhere = fallbackWhere.join(' AND ');
       const fSql = `
-        SELECT chunk_id, title, filename, page_content, user_id,
-               belongs_to, source_type, link_id, resource_id,
+        SELECT c.id AS chunk_id, c.user_id, c.entity_type, c.entity_id, c.resource_type,
+               c.chunk_order, c.page_number, c.header_path, c.title, c.source, c.content,
                -1.0 AS bm25_score
-        FROM chunks_fts
-        WHERE ${fWhere}
+        FROM chunks c
+        WHERE ${fallbackWhere.join(' AND ')}
         LIMIT ?
       `;
       fallbackParams.push(limit);
@@ -237,32 +218,4 @@ export function matchFts5(
   }
 
   return rows;
-}
-
-export function deleteByChunkId(db: Database.Database, chunkId: string): void {
-  db.prepare('DELETE FROM chunks_fts WHERE chunk_id = ?').run(chunkId);
-}
-
-export function deleteByFilename(db: Database.Database, filename: string, belongsTo?: string | null): void {
-  if (belongsTo) {
-    db.prepare('DELETE FROM chunks_fts WHERE filename = ? AND belongs_to = ?').run(filename, belongsTo);
-  } else {
-    db.prepare('DELETE FROM chunks_fts WHERE filename = ?').run(filename);
-  }
-}
-
-export function deleteByLinkId(db: Database.Database, linkId: string, belongsTo?: string | null): void {
-  if (belongsTo) {
-    db.prepare('DELETE FROM chunks_fts WHERE link_id = ? AND belongs_to = ?').run(linkId, belongsTo);
-  } else {
-    db.prepare('DELETE FROM chunks_fts WHERE link_id = ?').run(linkId);
-  }
-}
-
-export function deleteByResourceId(db: Database.Database, resourceId: string, userId?: string | null): void {
-  if (userId) {
-    db.prepare('DELETE FROM chunks_fts WHERE resource_id = ? AND user_id = ?').run(String(resourceId), String(userId));
-  } else {
-    db.prepare('DELETE FROM chunks_fts WHERE resource_id = ?').run(String(resourceId));
-  }
 }

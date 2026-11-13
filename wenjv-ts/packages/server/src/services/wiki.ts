@@ -3,8 +3,25 @@ import path from 'node:path';
 import { getDb } from '../db/index.js';
 import { config } from '../config.js';
 import { enqueueJob } from './jobs.js';
-import { deleteByResourceId } from '../db/fts5.js';
-import { getDocumentStore } from '../vector/document-store.js';
+import { deleteEntityChunks } from '../db/chunks.js';
+import { getTextStore } from '../vector/text-store.js';
+import { setEntityTags, getEntityTags, deleteEntityTags } from './tags.js';
+import { deleteAssetsByOwner } from './assets.js';
+
+export class ConflictError extends Error {
+  readonly status = 409;
+  constructor(message: string) {
+    super(message);
+    this.name = 'ConflictError';
+  }
+}
+
+export class VaultSecurityError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'VaultSecurityError';
+  }
+}
 
 export interface WikiPageRecord {
   id: number;
@@ -17,7 +34,7 @@ export interface WikiPageRecord {
   summary: string;
   sort_order: number;
   icon: string;
-  tags: string;
+  tags: string[];
   index_status: string;
   revision_count: number;
   created_at: string;
@@ -46,16 +63,29 @@ export interface WikiLinkNode {
   end: number;
 }
 
+export function normalizeTitle(title: string): string {
+  return String(title || '')
+    .replace(/[\r\n\t]+/g, ' ')
+    .trim();
+}
+
 export function generateSlug(title: string): string {
-  let slug = title.trim().toLowerCase().replace(/[^\p{L}\p{N}_\-\u4e00-\u9fff]+/gu, '-');
+  let slug = String(title || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}_\-\u4e00-\u9fff]+/gu, '-');
   slug = slug.replace(/-+/g, '-').replace(/^-|-$/g, '');
   return slug || 'untitled';
+}
+
+export function escapeLike(input: string): string {
+  return input.replace(/[\\%_]/g, (ch) => `\\${ch}`);
 }
 
 export function parseWikilinks(content: string): WikiLinkNode[] {
   if (!content) return [];
   const nodes: WikiLinkNode[] = [];
-  const linkRe = /\[\[([^\[\]|#\n]+)(?:#([^\[\]|\n]+))?(?:\|([^\[\]\n]+))?\]\]/g;
+  const linkRe = /\[\[([^\[\]|#\n]+)(?:#([^\[\]|\n]*))?(?:\|([^\[\]\n]*))?\]\]/g;
   const lines = content.split('\n');
   let currentOffset = 0;
   let inCodeFence = false;
@@ -69,12 +99,13 @@ export function parseWikilinks(content: string): WikiLinkNode[] {
     }
 
     if (!inCodeFence) {
+      linkRe.lastIndex = 0;
       let match: RegExpExecArray | null;
       while ((match = linkRe.exec(line)) !== null) {
         const raw = match[0];
-        const rawTarget = match[1]?.trim() || '';
-        const rawAnchor = match[2]?.trim() || null;
-        const rawAlias = match[3]?.trim() || null;
+        const rawTarget = (match[1] ?? '').trim();
+        const rawAnchor = match[2] !== undefined ? match[2].trim() : null;
+        const rawAlias = match[3] !== undefined ? match[3].trim() : null;
 
         const lineMatchStart = match.index;
         let isVisual = false;
@@ -111,30 +142,103 @@ export function parseWikilinks(content: string): WikiLinkNode[] {
   return nodes;
 }
 
-export function syncPageToVault(userId: number, slug: string, title: string, content: string): void {
-  try {
-    const safeSlug = generateSlug(slug);
-    const vaultDir = path.join(config.resolvedVaultDir, String(userId));
-    if (!fs.existsSync(vaultDir)) {
-      fs.mkdirSync(vaultDir, { recursive: true });
-    }
-    const filePath = path.join(vaultDir, `${safeSlug}.md`);
-    const frontmatter = `---\ntitle: ${JSON.stringify(title)}\nslug: ${JSON.stringify(slug)}\n---\n\n`;
-    fs.writeFileSync(filePath, frontmatter + content, 'utf8');
-  } catch {
-    // ignore vault write error
+export function rewriteLinksInContent(
+  content: string,
+  oldTitle: string,
+  newTitle: string
+): { content: string; changed: boolean } {
+  if (!content || oldTitle === newTitle) {
+    return { content, changed: false };
   }
+
+  const nodes = parseWikilinks(content);
+  const replacements: Array<{ start: number; end: number; text: string }> = [];
+
+  for (const node of nodes) {
+    if (node.kind !== 'wikilink') continue;
+    if (node.target !== oldTitle) continue;
+
+    const inner = node.raw.slice(2, -2);
+    const suffixIdx = inner.search(/[#|]/);
+    const suffix = suffixIdx >= 0 ? inner.slice(suffixIdx) : '';
+    replacements.push({
+      start: node.start,
+      end: node.end,
+      text: `[[${newTitle}${suffix}]]`,
+    });
+  }
+
+  if (replacements.length === 0) {
+    return { content, changed: false };
+  }
+
+  let out = '';
+  let cursor = 0;
+  for (const rep of replacements) {
+    out += content.slice(cursor, rep.start) + rep.text;
+    cursor = rep.end;
+  }
+  out += content.slice(cursor);
+
+  return { content: out, changed: out !== content };
+}
+
+function resolveSafeVaultFile(userId: number, slug: string): { vaultDir: string; filePath: string } {
+  const rawSlug = String(slug || '').trim();
+  if (!rawSlug || rawSlug === '.' || rawSlug === '..' || rawSlug.includes('/') || rawSlug.includes('\\')) {
+    throw new VaultSecurityError(`Unsafe wiki vault slug rejected (path traversal): ${rawSlug}`);
+  }
+
+  const safeSlug = generateSlug(rawSlug);
+  const vaultRoot = path.resolve(config.resolvedVaultDir);
+  if (!fs.existsSync(vaultRoot)) {
+    fs.mkdirSync(vaultRoot, { recursive: true });
+  }
+
+  const userVaultDir = path.resolve(vaultRoot, String(userId));
+  if (!userVaultDir.startsWith(vaultRoot + path.sep)) {
+    throw new VaultSecurityError('Vault user directory escapes root');
+  }
+  if (!fs.existsSync(userVaultDir)) {
+    fs.mkdirSync(userVaultDir, { recursive: true });
+  }
+
+  const userDirStat = fs.lstatSync(userVaultDir);
+  if (userDirStat.isSymbolicLink()) {
+    throw new VaultSecurityError('Vault user directory cannot be a symlink');
+  }
+
+  const realRoot = fs.realpathSync(vaultRoot);
+  const realUserDir = fs.realpathSync(userVaultDir);
+  if (!realUserDir.startsWith(realRoot + path.sep) && realUserDir !== realRoot) {
+    throw new VaultSecurityError('Vault user directory realpath escapes root');
+  }
+
+  const filePath = path.resolve(userVaultDir, `${safeSlug}.md`);
+  if (!filePath.startsWith(userVaultDir + path.sep)) {
+    throw new VaultSecurityError('Vault target file escapes user vault directory');
+  }
+
+  if (fs.existsSync(filePath)) {
+    const stat = fs.lstatSync(filePath);
+    if (stat.isSymbolicLink()) {
+      throw new VaultSecurityError(`Refusing vault operation on symlink target: ${filePath}`);
+    }
+  }
+
+  return { vaultDir: userVaultDir, filePath };
+}
+
+export function syncPageToVault(userId: number, slug: string, title: string, content: string): void {
+  const { filePath } = resolveSafeVaultFile(userId, slug);
+  const frontmatter = `---\ntitle: ${JSON.stringify(title)}\nslug: ${JSON.stringify(slug)}\n---\n\n`;
+  fs.writeFileSync(filePath, frontmatter + content, 'utf8');
 }
 
 export function removePageFromVault(userId: number, slug: string): void {
-  try {
-    const safeSlug = generateSlug(slug);
-    const filePath = path.join(config.resolvedVaultDir, String(userId), `${safeSlug}.md`);
-    if (fs.existsSync(filePath)) {
-      fs.unlinkSync(filePath);
-    }
-  } catch {
-    // ignore
+  const { filePath } = resolveSafeVaultFile(userId, slug);
+  if (fs.existsSync(filePath)) {
+    fs.unlinkSync(filePath);
   }
 }
 
@@ -176,7 +280,14 @@ export function getWikiTree(userId: number): WikiTreeNode[] {
 
 export function getWikiPage(userId: number, pageId: number): WikiPageRecord | null {
   const db = getDb();
-  return (db.prepare('SELECT * FROM wiki_pages WHERE id = ? AND user_id = ?').get(pageId, userId) as WikiPageRecord) || null;
+  const row = db.prepare('SELECT * FROM wiki_pages WHERE id = ? AND user_id = ?').get(pageId, userId) as
+    | Omit<WikiPageRecord, 'tags'>
+    | undefined;
+  if (!row) return null;
+  return {
+    ...row,
+    tags: getEntityTags(db, userId, 'wiki', row.id),
+  };
 }
 
 export interface CreateWikiPageParams {
@@ -191,9 +302,12 @@ export interface CreateWikiPageParams {
 
 export function createWikiPage(params: CreateWikiPageParams): WikiPageRecord {
   const db = getDb();
-  const slug = generateSlug(params.title);
+  const cleanTitle = normalizeTitle(params.title);
+  if (!cleanTitle) {
+    throw new Error('Wiki page title cannot be empty');
+  }
+  const slug = generateSlug(cleanTitle);
 
-  // Compute materialized path
   let parentPath = '/';
   if (params.parentId) {
     const parent = db.prepare('SELECT path FROM wiki_pages WHERE id = ? AND user_id = ?').get(params.parentId, params.userId) as
@@ -204,45 +318,42 @@ export function createWikiPage(params: CreateWikiPageParams): WikiPageRecord {
     }
   }
 
-  const tagsJson = JSON.stringify(params.tags || []);
   const res = db
     .prepare(`
       INSERT INTO wiki_pages(
-        user_id, parent_id, path, slug, title, content, summary, sort_order, icon, tags, index_status, revision_count
+        user_id, parent_id, path, slug, title, content, summary, sort_order, icon, index_status, revision_count
       )
-      VALUES (?, ?, ?, ?, ?, ?, '', 0, ?, ?, 'pending', 1)
+      VALUES (?, ?, ?, ?, ?, ?, '', 0, ?, 'pending', 1)
     `)
     .run(
       params.userId,
       params.parentId || null,
       parentPath,
       slug,
-      params.title,
+      cleanTitle,
       params.content,
-      params.icon || '',
-      tagsJson
+      params.icon || ''
     );
 
   const pageId = Number(res.lastInsertRowid);
   const fullPath = `${parentPath}${pageId}/`;
   db.prepare('UPDATE wiki_pages SET path = ? WHERE id = ?').run(fullPath, pageId);
 
-  // Revision 1
+  if (params.tags && params.tags.length > 0) {
+    setEntityTags(db, params.userId, 'wiki', pageId, params.tags);
+  }
+
   db.prepare(`
     INSERT INTO wiki_revisions(page_id, user_id, rev_no, title, content, char_count)
     VALUES (?, ?, 1, ?, ?, ?)
-  `).run(pageId, params.userId, params.title, params.content, params.content.length);
+  `).run(pageId, params.userId, cleanTitle, params.content, params.content.length);
 
-  // Sync to vault
-  syncPageToVault(params.userId, slug, params.title, params.content);
-
-  // Update links
+  syncPageToVault(params.userId, slug, cleanTitle, params.content);
   updatePageLinks(params.userId, pageId, params.content);
 
-  // Enqueue wiki indexing job
   enqueueJob({
-    job_type: 'wiki',
-    resource_id: pageId,
+    entity_type: 'wiki',
+    entity_id: pageId,
     user_id: params.userId,
     user_email: params.userEmail,
   });
@@ -258,6 +369,26 @@ export interface UpdateWikiPageParams {
   content?: string | undefined;
   icon?: string | undefined;
   tags?: string[] | undefined;
+  expectedRevNo?: number | undefined;
+}
+
+function recordRevisionAndSync(
+  userId: number,
+  pageId: number,
+  revCount: number,
+  title: string,
+  content: string
+): void {
+  const db = getDb();
+  db.prepare(`
+    INSERT INTO wiki_revisions(page_id, user_id, rev_no, title, content, char_count)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(pageId, userId, revCount, title, content, content.length);
+
+  db.prepare(`
+    DELETE FROM wiki_revisions
+    WHERE page_id = ? AND rev_no < ?
+  `).run(pageId, revCount - 10);
 }
 
 export function updateWikiPage(params: UpdateWikiPageParams): WikiPageRecord {
@@ -265,47 +396,115 @@ export function updateWikiPage(params: UpdateWikiPageParams): WikiPageRecord {
   const current = getWikiPage(params.userId, params.pageId);
   if (!current) throw new Error('Wiki page not found');
 
-  const newTitle = params.title !== undefined ? params.title : current.title;
-  const newContent = params.content !== undefined ? params.content : current.content;
-  const newIcon = params.icon !== undefined ? params.icon : current.icon;
-  const newTags = params.tags !== undefined ? JSON.stringify(params.tags) : current.tags;
-  const contentChanged = newContent !== current.content || newTitle !== current.title;
-
-  let revCount = current.revision_count;
-  if (contentChanged) {
-    revCount += 1;
-    // Cap revisions to last 10
-    db.prepare(`
-      INSERT INTO wiki_revisions(page_id, user_id, rev_no, title, content, char_count)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `).run(params.pageId, params.userId, revCount, newTitle, newContent, newContent.length);
-
-    db.prepare(`
-      DELETE FROM wiki_revisions
-      WHERE page_id = ? AND rev_no < ?
-    `).run(params.pageId, revCount - 10);
+  if (params.expectedRevNo !== undefined && current.revision_count !== params.expectedRevNo) {
+    throw new ConflictError(
+      `Conflict: page has been modified (current rev: ${current.revision_count}, expected: ${params.expectedRevNo}).`
+    );
   }
 
-  db.prepare(`
-    UPDATE wiki_pages
-    SET title = ?,
-        content = ?,
-        icon = ?,
-        tags = ?,
-        revision_count = ?,
-        updated_at = CURRENT_TIMESTAMP
-    WHERE id = ? AND user_id = ?
-  `).run(newTitle, newContent, newIcon, newTags, revCount, params.pageId, params.userId);
+  const newTitle = params.title !== undefined ? normalizeTitle(params.title) : current.title;
+  if (!newTitle) {
+    throw new Error('Wiki page title cannot be empty');
+  }
+  const newContent = params.content !== undefined ? params.content : current.content;
+  const newIcon = params.icon !== undefined ? params.icon : current.icon;
+  const titleChanged = newTitle !== current.title;
+  const contentChanged = newContent !== current.content || titleChanged;
 
+  const jobsToEnqueue: Array<{ entityId: number; payload?: Record<string, unknown> }> = [];
+
+  const runTx = db.transaction(() => {
+    let revCount = current.revision_count;
+    if (contentChanged) {
+      revCount += 1;
+      recordRevisionAndSync(params.userId, params.pageId, revCount, newTitle, newContent);
+    }
+
+    db.prepare(`
+      UPDATE wiki_pages
+      SET title = ?,
+          content = ?,
+          icon = ?,
+          revision_count = ?,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE id = ? AND user_id = ?
+    `).run(newTitle, newContent, newIcon, revCount, params.pageId, params.userId);
+
+    if (params.tags !== undefined) {
+      setEntityTags(db, params.userId, 'wiki', params.pageId, params.tags);
+    }
+
+    updatePageLinks(params.userId, params.pageId, newContent);
+
+    if (titleChanged) {
+      // Check alias collision with another page for the same user
+      const conflictingAlias = db
+        .prepare('SELECT page_id FROM wiki_aliases WHERE user_id = ? AND alias_title = ?')
+        .get(params.userId, current.title) as { page_id: number } | undefined;
+
+      if (!conflictingAlias) {
+        db.prepare(`
+          INSERT OR IGNORE INTO wiki_aliases(page_id, user_id, alias_title)
+          VALUES (?, ?, ?)
+        `).run(params.pageId, params.userId, current.title);
+      }
+
+      // Update wiki_links target_title strictly for this tenant & target page
+      db.prepare(`
+        UPDATE wiki_links
+        SET target_title = ?
+        WHERE user_id = ? AND target_page_id = ? AND link_type = 'wikilink'
+      `).run(newTitle, params.userId, params.pageId);
+
+      // Rewrite links in all tenant-owned source pages pointing to this page
+      const sourcePages = db
+        .prepare(`
+          SELECT DISTINCT wp.*
+          FROM wiki_pages wp
+          JOIN wiki_links wl ON wl.source_page_id = wp.id
+          WHERE wp.user_id = ? AND wl.user_id = ? AND wl.target_page_id = ?
+        `)
+        .all(params.userId, params.userId, params.pageId) as WikiPageRecord[];
+
+      for (const src of sourcePages) {
+        if (src.id === params.pageId) continue;
+        const { content: rewritten, changed } = rewriteLinksInContent(src.content || '', current.title, newTitle);
+        if (!changed) continue;
+
+        const nextSrcRev = src.revision_count + 1;
+        recordRevisionAndSync(params.userId, src.id, nextSrcRev, src.title, rewritten);
+        db.prepare(`
+          UPDATE wiki_pages
+          SET content = ?, revision_count = ?, updated_at = CURRENT_TIMESTAMP
+          WHERE id = ? AND user_id = ?
+        `).run(rewritten, nextSrcRev, src.id, params.userId);
+
+        updatePageLinks(params.userId, src.id, rewritten);
+        syncPageToVault(params.userId, src.slug, src.title, rewritten);
+        jobsToEnqueue.push({ entityId: src.id, payload: { reason: 'title_rename_rewrite' } });
+      }
+    }
+  });
+
+  runTx();
   syncPageToVault(params.userId, current.slug, newTitle, newContent);
-  updatePageLinks(params.userId, params.pageId, newContent);
 
   if (contentChanged) {
     enqueueJob({
-      job_type: 'wiki',
-      resource_id: params.pageId,
+      entity_type: 'wiki',
+      entity_id: params.pageId,
       user_id: params.userId,
       user_email: params.userEmail,
+    });
+  }
+
+  for (const j of jobsToEnqueue) {
+    enqueueJob({
+      entity_type: 'wiki',
+      entity_id: j.entityId,
+      user_id: params.userId,
+      user_email: params.userEmail,
+      ...(j.payload ? { payload: j.payload } : {}),
     });
   }
 
@@ -322,16 +521,24 @@ export async function deleteWikiPage(userId: number, pageId: number): Promise<bo
   db.prepare('DELETE FROM wiki_revisions WHERE page_id = ?').run(pageId);
   db.prepare('DELETE FROM wiki_links WHERE source_page_id = ? OR target_page_id = ?').run(pageId, pageId);
   db.prepare('DELETE FROM wiki_aliases WHERE page_id = ?').run(pageId);
+  deleteEntityTags(db, userId, 'wiki', pageId);
   db.prepare('DELETE FROM wiki_pages WHERE id = ? AND user_id = ?').run(pageId, userId);
 
-  deleteByResourceId(db, String(pageId), String(userId));
-  const docStore = getDocumentStore();
-  await docStore.deleteByResourceId(String(pageId), userId);
+  deleteEntityChunks(db, 'wiki', pageId, userId);
+  const textStore = getTextStore();
+  await textStore.deleteByEntity('wiki', pageId, userId);
+  await deleteAssetsByOwner(userId, 'wiki', pageId);
 
   return true;
 }
 
-export function moveWikiPage(userId: number, pageId: number, targetParentId: number | null, sortOrder = 0): WikiPageRecord {
+export function moveWikiPage(
+  userId: number,
+  userEmail: string,
+  pageId: number,
+  targetParentId: number | null,
+  sortOrder = 0
+): WikiPageRecord {
   const db = getDb();
   const current = getWikiPage(userId, pageId);
   if (!current) throw new Error('Wiki page not found');
@@ -352,18 +559,41 @@ export function moveWikiPage(userId: number, pageId: number, targetParentId: num
 
   const newPath = `${newParentPath}${pageId}/`;
   const oldPath = current.path;
+  const affectedIds: number[] = [pageId];
 
-  db.prepare(`
-    UPDATE wiki_pages
-    SET parent_id = ?, path = ?, sort_order = ?, updated_at = CURRENT_TIMESTAMP
-    WHERE id = ? AND user_id = ?
-  `).run(targetParentId, newPath, sortOrder, pageId, userId);
+  const runMoveTx = db.transaction(() => {
+    db.prepare(`
+      UPDATE wiki_pages
+      SET parent_id = ?, path = ?, sort_order = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE id = ? AND user_id = ?
+    `).run(targetParentId, newPath, sortOrder, pageId, userId);
 
-  // Update descendant paths
-  const descendants = db.prepare('SELECT id, path FROM wiki_pages WHERE user_id = ? AND path LIKE ?').all(userId, `${oldPath}%`) as { id: number; path: string }[];
-  for (const d of descendants) {
-    const updatedDescPath = d.path.replace(oldPath, newPath);
-    db.prepare('UPDATE wiki_pages SET path = ? WHERE id = ?').run(updatedDescPath, d.id);
+    // Update all strict descendant paths using escaped LIKE prefix
+    const escapedOldPrefix = `${escapeLike(oldPath)}%`;
+    const descendants = db
+      .prepare("SELECT id, path FROM wiki_pages WHERE user_id = ? AND id != ? AND path LIKE ? ESCAPE '\\'")
+      .all(userId, pageId, escapedOldPrefix) as { id: number; path: string }[];
+
+    const updateDesc = db.prepare('UPDATE wiki_pages SET path = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?');
+    for (const d of descendants) {
+      const updatedDescPath = d.path.startsWith(oldPath)
+        ? `${newPath}${d.path.slice(oldPath.length)}`
+        : d.path;
+      updateDesc.run(updatedDescPath, d.id, userId);
+      affectedIds.push(d.id);
+    }
+  });
+
+  runMoveTx();
+
+  for (const id of affectedIds) {
+    enqueueJob({
+      entity_type: 'wiki',
+      entity_id: id,
+      user_id: userId,
+      user_email: userEmail,
+      payload: { reason: 'tree_move_breadcrumb_sync', moved_root_id: pageId },
+    });
   }
 
   return getWikiPage(userId, pageId)!;
@@ -393,6 +623,19 @@ export function rollbackWikiPage(userId: number, userEmail: string, pageId: numb
   });
 }
 
+function resolveTargetPageId(userId: number, targetTitle: string): number | null {
+  const db = getDb();
+  const direct = db
+    .prepare('SELECT id FROM wiki_pages WHERE user_id = ? AND (title = ? OR slug = ?)')
+    .get(userId, targetTitle, generateSlug(targetTitle)) as { id: number } | undefined;
+  if (direct) return direct.id;
+
+  const alias = db
+    .prepare('SELECT page_id FROM wiki_aliases WHERE user_id = ? AND alias_title = ?')
+    .get(userId, targetTitle) as { page_id: number } | undefined;
+  return alias ? alias.page_id : null;
+}
+
 function updatePageLinks(userId: number, pageId: number, content: string): void {
   const db = getDb();
   const links = parseWikilinks(content);
@@ -404,21 +647,16 @@ function updatePageLinks(userId: number, pageId: number, content: string): void 
   `);
 
   for (const l of links) {
-    if (l.kind === 'wikilink') {
-      const targetPage = db
-        .prepare('SELECT id FROM wiki_pages WHERE user_id = ? AND (title = ? OR slug = ?)')
-        .get(userId, l.target, generateSlug(l.target)) as { id: number } | undefined;
-
-      insertStmt.run(
-        userId,
-        pageId,
-        targetPage ? targetPage.id : null,
-        l.target,
-        l.alias || null,
-        'wikilink',
-        l.anchor || null
-      );
-    }
+    const targetPageId = l.kind === 'wikilink' ? resolveTargetPageId(userId, l.target) : null;
+    insertStmt.run(
+      userId,
+      pageId,
+      targetPageId,
+      l.target,
+      l.alias ?? '',
+      l.kind,
+      l.anchor ?? ''
+    );
   }
 }
 
@@ -436,4 +674,94 @@ export function getWikiGraph(userId: number): { nodes: Array<{ id: number; title
   }));
 
   return { nodes: pages, links };
+}
+
+function computeExcludedSpans(line: string): Array<[number, number]> {
+  const spans: Array<[number, number]> = [];
+  const patterns = [
+    /!?\[\[[^\[\]\n]+\]\]/g, // wikilinks & visual embeds
+    /`[^`]+`/g,               // inline code
+    /\[[^\]]+\]\([^)]+\)/g,   // markdown links
+  ];
+  for (const re of patterns) {
+    re.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(line)) !== null) {
+      spans.push([m.index, m.index + m[0].length]);
+    }
+  }
+  return spans;
+}
+
+export function findPlainMentionRange(line: string, targetTitle: string): [number, number] | null {
+  if (!line || !targetTitle) return null;
+  const excluded = computeExcludedSpans(line);
+  const titleEsc = targetTitle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const isAsciiTitle = /^[A-Za-z0-9 _.-]+$/.test(targetTitle);
+  const pattern = isAsciiTitle ? new RegExp(`(?<![A-Za-z0-9_])${titleEsc}(?![A-Za-z0-9_])`, 'gi') : new RegExp(titleEsc, 'g');
+
+  pattern.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = pattern.exec(line)) !== null) {
+    const start = m.index;
+    const end = start + m[0].length;
+    const overlapsExcluded = excluded.some(([s, e]) => start < e && end > s);
+    if (!overlapsExcluded) {
+      return [start, end];
+    }
+  }
+  return null;
+}
+
+export function findUnlinkedMentions(
+  userId: number,
+  targetPage: WikiPageRecord
+): Array<{ page_id: number; title: string; slug: string; mentions: Array<{ line_no: number; excerpt: string }> }> {
+  const db = getDb();
+  const linkedPageIds = new Set(
+    (
+      db
+        .prepare('SELECT source_page_id FROM wiki_links WHERE user_id = ? AND target_page_id = ?')
+        .all(userId, targetPage.id) as { source_page_id: number }[]
+    ).map((r) => r.source_page_id)
+  );
+
+  const escapedLikeTitle = `%${escapeLike(targetPage.title)}%`;
+  const candidates = db
+    .prepare("SELECT id, title, slug, content FROM wiki_pages WHERE user_id = ? AND id != ? AND content LIKE ? ESCAPE '\\' LIMIT 50")
+    .all(userId, targetPage.id, escapedLikeTitle) as Array<{ id: number; title: string; slug: string; content: string }>;
+
+  const results: Array<{ page_id: number; title: string; slug: string; mentions: Array<{ line_no: number; excerpt: string }> }> = [];
+  for (const cand of candidates) {
+    if (linkedPageIds.has(cand.id)) continue;
+
+    const lines = (cand.content || '').split('\n');
+    let inFence = false;
+    const matchesFound: Array<{ line_no: number; excerpt: string }> = [];
+
+    for (let lineNo = 0; lineNo < lines.length; lineNo++) {
+      const line = lines[lineNo]!;
+      if (/^\s*```/.test(line)) {
+        inFence = !inFence;
+        continue;
+      }
+      if (!inFence && findPlainMentionRange(line, targetPage.title) !== null) {
+        matchesFound.push({
+          line_no: lineNo + 1,
+          excerpt: line.trim().slice(0, 160),
+        });
+      }
+    }
+
+    if (matchesFound.length > 0) {
+      results.push({
+        page_id: cand.id,
+        title: cand.title,
+        slug: cand.slug,
+        mentions: matchesFound,
+      });
+    }
+  }
+
+  return results;
 }

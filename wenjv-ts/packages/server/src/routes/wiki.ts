@@ -8,8 +8,10 @@ import { getDb } from '../db/index.js';
 import { matchFts5 } from '../db/fts5.js';
 import { authMiddleware, type AuthUser } from '../auth/middleware.js';
 import { streamChatCompletions, type ChatMessage } from '../ai/llm-chat.js';
+import { registerAsset } from '../services/assets.js';
 import { config } from '../config.js';
 import {
+  ConflictError,
   getWikiTree,
   getWikiPage,
   createWikiPage,
@@ -19,6 +21,8 @@ import {
   getWikiRevisions,
   rollbackWikiPage,
   getWikiGraph,
+  findUnlinkedMentions,
+  findPlainMentionRange,
 } from '../services/wiki.js';
 
 export const wikiRouter = new Hono();
@@ -78,6 +82,10 @@ wikiRouter.put('/pages/:id', authMiddleware, async (c) => {
   const user = c.get('user') as AuthUser;
   const id = parseInt(c.req.param('id') || '0', 10);
   const json = await c.req.json();
+  const expectedRevNo =
+    json.expected_rev_no !== undefined && json.expected_rev_no !== null
+      ? Number(json.expected_rev_no)
+      : undefined;
 
   try {
     const page = updateWikiPage({
@@ -88,9 +96,13 @@ wikiRouter.put('/pages/:id', authMiddleware, async (c) => {
       content: json.content !== undefined ? String(json.content) : undefined,
       icon: json.icon !== undefined ? String(json.icon) : undefined,
       tags: Array.isArray(json.tags) ? json.tags : undefined,
+      expectedRevNo,
     });
     return c.json(page);
   } catch (err: unknown) {
+    if (err instanceof ConflictError) {
+      return c.json({ detail: err.message }, 409);
+    }
     const msg = err instanceof Error ? err.message : String(err);
     return c.json({ detail: msg }, 400);
   }
@@ -118,7 +130,7 @@ wikiRouter.post('/pages/:id/move', authMiddleware, async (c) => {
   const sortOrder = json.sort_order !== undefined ? Number(json.sort_order) : 0;
 
   try {
-    const page = moveWikiPage(user.id, id, targetParentId, sortOrder);
+    const page = moveWikiPage(user.id, user.email, id, targetParentId, sortOrder);
     return c.json(page);
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -201,9 +213,25 @@ wikiRouter.post('/pages/:id/assets', authMiddleware, async (c) => {
   fs.writeFileSync(savedPath, stdBytes);
 
   const safeTitle = origName.replace(/[\[\]\|]/g, '').trim() || 'image.jpg';
+  const relPath = `mm_assets/${resId}/${filename}`;
+  const asset = await registerAsset({
+    id: assetId,
+    userId: user.id,
+    ownerType: 'wiki',
+    ownerId: page.id,
+    filename: origName,
+    relPath,
+    absPath: savedPath,
+    mimeType: 'image/jpeg',
+    size: stdBytes.length,
+    caption: safeTitle,
+    bytesForVisualIndex: stdBytes,
+  });
+
   const markdownTag = `![[visual:${resId}/${filename}|${safeTitle}]]`;
 
   return c.json({
+    id: asset.id,
     asset_id: filename,
     resource_id: resId,
     saved_path: savedPath,
@@ -293,55 +321,7 @@ wikiRouter.get('/pages/:id/unlinked-mentions', authMiddleware, (c) => {
     return c.json({ detail: 'Wiki page not found' }, 404);
   }
 
-  const db = getDb();
-  const linkedPageIds = new Set(
-    (
-      db
-        .prepare('SELECT source_page_id FROM wiki_links WHERE user_id = ? AND target_page_id = ?')
-        .all(user.id, id) as { source_page_id: number }[]
-    ).map((r) => r.source_page_id)
-  );
-
-  const candidates = db
-    .prepare('SELECT id, title, slug, content FROM wiki_pages WHERE user_id = ? AND id != ? AND content LIKE ? LIMIT 30')
-    .all(user.id, id, `%${page.title}%`) as Array<{ id: number; title: string; slug: string; content: string }>;
-
-  const titleEsc = page.title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const mentionRe = new RegExp(`(?<!\\[\\[)(${titleEsc})(?!\\]\\])`);
-
-  const results = [];
-  for (const cand of candidates) {
-    if (linkedPageIds.has(cand.id)) continue;
-
-    const lines = (cand.content || '').split('\n');
-    let inFence = false;
-    const matchesFound = [];
-
-    for (let lineNo = 0; lineNo < lines.length; lineNo++) {
-      const line = lines[lineNo]!;
-      if (/^\s*```/.test(line)) {
-        inFence = !inFence;
-        continue;
-      }
-      if (!inFence && mentionRe.test(line)) {
-        matchesFound.push({
-          line_no: lineNo + 1,
-          excerpt: line.trim().slice(0, 160),
-        });
-      }
-    }
-
-    if (matchesFound.length > 0) {
-      results.push({
-        page_id: cand.id,
-        title: cand.title,
-        slug: cand.slug,
-        mentions: matchesFound,
-      });
-    }
-  }
-
-  return c.json(results);
+  return c.json(findUnlinkedMentions(user.id, page));
 });
 
 // POST /wiki/pages/:id/link-mention
@@ -360,13 +340,10 @@ wikiRouter.post('/pages/:id/link-mention', authMiddleware, async (c) => {
     return c.json({ detail: 'Source page not found' }, 404);
   }
 
-  const titleEsc = page.title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const mentionRe = new RegExp(`(?<!\\[\\[)(${titleEsc})(?!\\]\\])`);
-
   const lines = (sourcePage.content || '').split('\n');
   let inFence = false;
   let replaced = false;
-  const newLines = [];
+  const newLines: string[] = [];
 
   for (const line of lines) {
     if (/^\s*```/.test(line)) {
@@ -374,12 +351,18 @@ wikiRouter.post('/pages/:id/link-mention', authMiddleware, async (c) => {
       newLines.push(line);
       continue;
     }
-    if (!inFence && !replaced && mentionRe.test(line)) {
-      newLines.push(line.replace(mentionRe, `[[${page.title}]]`));
-      replaced = true;
-    } else {
-      newLines.push(line);
+    if (!inFence && !replaced) {
+      const range = findPlainMentionRange(line, page.title);
+      if (range) {
+        const [start, end] = range;
+        const matchedText = line.slice(start, end);
+        const linkText = matchedText === page.title ? `[[${page.title}]]` : `[[${page.title}|${matchedText}]]`;
+        newLines.push(line.slice(0, start) + linkText + line.slice(end));
+        replaced = true;
+        continue;
+      }
     }
+    newLines.push(line);
   }
 
   if (!replaced) {
@@ -391,6 +374,7 @@ wikiRouter.post('/pages/:id/link-mention', authMiddleware, async (c) => {
     userEmail: user.email,
     pageId: sourcePageId,
     content: newLines.join('\n'),
+    expectedRevNo: sourcePage.revision_count,
   });
 
   return c.json({ status: 'ok', message: `Linked mention in page ${sourcePageId}` });
@@ -492,21 +476,21 @@ wikiRouter.get('/search', authMiddleware, (c) => {
     try {
       const ftsHits = matchFts5(db, q, {
         userId: user.id,
-        sourceType: 'wiki',
+        resourceType: 'wiki',
         limit: 15 - results.length,
       });
 
       for (const hit of ftsHits) {
-        const resId = Number(hit.resource_id);
+        const resId = Number(hit.entity_id);
         if (resId && !seenIds.has(resId)) {
           seenIds.add(resId);
           results.push({
             id: resId,
             title: hit.title || 'Untitled',
-            slug: hit.filename ? hit.filename.replace(/\.md$/, '') : '',
+            slug: hit.source ? hit.source.replace(/\.md$/, '') : '',
             path: '',
             icon: '',
-            snippet: (hit.page_content || '').slice(0, 120),
+            snippet: (hit.content || '').slice(0, 120),
             match_source: 'content',
           });
         }

@@ -3,7 +3,8 @@ import path from 'node:path';
 import os from 'node:os';
 import { getDb, closeDb } from '../src/db/index.js';
 import { loadConfig } from '../src/config.js';
-import { resetDocumentStore } from '../src/vector/document-store.js';
+import { resetTextStore } from '../src/vector/text-store.js';
+import { resetVisualStore } from '../src/vector/visual-store.js';
 import { createApp } from '../src/main.js';
 import type { Hono } from 'hono';
 
@@ -33,14 +34,16 @@ export function setupTestEnv(): TestEnv {
   });
 
   closeDb();
-  resetDocumentStore();
+  resetTextStore();
+  resetVisualStore();
   getDb(dbPath);
 
   const app = createApp();
 
   const cleanup = () => {
     closeDb();
-    resetDocumentStore();
+    resetTextStore();
+    resetVisualStore();
     try {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     } catch {

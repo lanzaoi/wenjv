@@ -36,8 +36,8 @@ const ConfigSchema = z.object({
   BASE_DIR: z.string().default(defaultBaseDir),
   DB_PATH: z.string().optional(),
   LANCE_DIR: z.string().optional(),
-  VECTOR_STORE_COLLECTION_NAME: z.string().default('document_store'),
-  VISUAL_VECTOR_STORE_COLLECTION_NAME: z.string().default('visual_store'),
+  VECTOR_STORE_COLLECTION_NAME: z.string().default('text_vectors'),
+  VISUAL_VECTOR_STORE_COLLECTION_NAME: z.string().default('visual_vectors'),
   UPLOAD_DIR: z.string().optional(),
   VAULT_DIR: z.string().optional(),
   MODELS_DIR: z.string().default(
@@ -86,10 +86,22 @@ export type Config = z.infer<typeof ConfigSchema> & {
 export const config: Config = {} as Config;
 
 export function loadConfig(overrides?: Partial<z.infer<typeof ConfigSchema>>): Config {
-  const parsed = ConfigSchema.parse({
-    ...mergedEnv,
+  const effectiveBaseDir =
+    overrides?.BASE_DIR ||
+    process.env['WENJV_BASE_DIR'] ||
+    process.env['BASE_DIR'] ||
+    path.join(os.homedir(), '.config', 'wenjv');
+  const dynamicFileEnv = parseEnvFile(path.join(effectiveBaseDir, 'backend.env'));
+  const combined: Record<string, unknown> = {
+    ...dynamicFileEnv,
+    ...process.env,
     ...overrides,
-  });
+  };
+  if (!combined['JWT_SECRET'] && typeof combined['SECRET_KEY'] === 'string' && combined['SECRET_KEY']) {
+    combined['JWT_SECRET'] = combined['SECRET_KEY'];
+  }
+
+  const parsed = ConfigSchema.parse(combined);
 
   const baseDir = parsed.BASE_DIR;
   const resolvedDbPath = parsed.DB_PATH || path.join(baseDir, 'wenjv.db');

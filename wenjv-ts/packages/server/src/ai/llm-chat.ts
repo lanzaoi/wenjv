@@ -1,15 +1,39 @@
 import { config } from '../config.js';
 
+export interface ChatImagePart {
+  data: string;
+  mime_type?: string;
+}
+
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant';
   content: string;
-  images?: Array<string | { data: string; mime_type?: string }>;
+  images?: Array<string | ChatImagePart>;
 }
 
 export interface ChatCompletionOptions {
   model?: string;
   messages: ChatMessage[];
   signal?: AbortSignal;
+}
+
+type OpenAIMessageContent =
+  | string
+  | Array<
+      | { type: 'text'; text: string }
+      | { type: 'image_url'; image_url: { url: string } }
+    >;
+
+function toDataUrl(img: string | ChatImagePart): string | null {
+  if (typeof img === 'string') {
+    const trimmed = img.trim();
+    if (!trimmed) return null;
+    if (trimmed.startsWith('data:image/')) return trimmed;
+    return `data:image/jpeg;base64,${trimmed}`;
+  }
+  if (!img.data) return null;
+  const mime = img.mime_type || 'image/jpeg';
+  return img.data.startsWith('data:image/') ? img.data : `data:${mime};base64,${img.data}`;
 }
 
 export async function* streamChatCompletions(
@@ -23,10 +47,25 @@ export async function* streamChatCompletions(
     ? apiBase
     : `${apiBase}/chat/completions`;
 
-  const formattedMessages = options.messages.map((m) => ({
-    role: m.role,
-    content: m.content,
-  }));
+  const formattedMessages: Array<{ role: string; content: OpenAIMessageContent }> = options.messages.map((m) => {
+    if (m.role === 'user' && m.images && m.images.length > 0) {
+      const parts: Array<
+        | { type: 'text'; text: string }
+        | { type: 'image_url'; image_url: { url: string } }
+      > = [];
+      for (const img of m.images) {
+        const dataUrl = toDataUrl(img);
+        if (dataUrl) {
+          parts.push({ type: 'image_url', image_url: { url: dataUrl } });
+        }
+      }
+      if (parts.length > 0) {
+        parts.push({ type: 'text', text: m.content });
+        return { role: m.role, content: parts };
+      }
+    }
+    return { role: m.role, content: m.content };
+  });
 
   const payload = {
     model,
@@ -64,6 +103,7 @@ export async function* streamChatCompletions(
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
+  let inReasoning = false;
 
   try {
     while (true) {
@@ -82,8 +122,24 @@ export async function* streamChatCompletions(
 
         try {
           const parsed = JSON.parse(dataStr);
-          const delta = parsed.choices?.[0]?.delta;
-          if (delta?.content) {
+          const delta = parsed.choices?.[0]?.delta as
+            | { content?: string; reasoning_content?: string }
+            | undefined;
+          if (!delta) continue;
+
+          if (delta.reasoning_content) {
+            if (!inReasoning) {
+              inReasoning = true;
+              yield '> 💭 *思考过程*：\n> ';
+            }
+            yield delta.reasoning_content.replace(/\n/g, '\n> ');
+          }
+
+          if (delta.content) {
+            if (inReasoning) {
+              inReasoning = false;
+              yield '\n\n';
+            }
             yield delta.content;
           }
         } catch {

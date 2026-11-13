@@ -199,6 +199,18 @@ export function renderMarkdown(rawMd: string): string {
   return out.join('\n');
 }
 
+function isSafeLinkUrl(rawUrl: string): boolean {
+  const trimmed = unescapeHtml(rawUrl).trim();
+  if (!trimmed) return false;
+  if (trimmed.startsWith('/') || trimmed.startsWith('#')) return true;
+  try {
+    const parsed = new URL(trimmed);
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:' || parsed.protocol === 'mailto:';
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Inline formatting:
  * - [[Target Page|Alias]] or [[Target Page]]
@@ -219,9 +231,10 @@ export function parseInline(text: string): string {
 
   // Visual Embeds: ![[visual:resource_id/filename|alt]] or ![[visual:resource_id/filename]]
   safe = safe.replace(/!\[\[visual:([^|\]]+)(?:\|([^\]]+))?\]\]/g, (_, assetPath, alt) => {
-    const rawPath = String(assetPath || '').trim();
-    const label = String(alt || rawPath).trim();
-    const imgSrc = `/api/documents/assets/image?path=mm_assets/${encodeURIComponent(rawPath)}`;
+    const rawPath = unescapeHtml(String(assetPath || '')).trim();
+    const label = unescapeHtml(String(alt || rawPath)).trim();
+    const normalizedPath = rawPath.startsWith('mm_assets/') ? rawPath : `mm_assets/${rawPath}`;
+    const imgSrc = `/api/assets/image?path=${encodeURIComponent(normalizedPath)}`;
     return `<div class="wiki-visual-embed"><img src="${imgSrc}" alt="${escapeHtml(label)}" class="wiki-embed-img" /><span class="wiki-embed-caption">${escapeHtml(label)}</span></div>`;
   });
 
@@ -235,8 +248,13 @@ export function parseInline(text: string): string {
     return `<button type="button" class="wiki-link-btn" data-wiki-target="${escapeHtml(rawTarget)}" data-wiki-anchor="${escapeHtml(rawAnchor)}" title="跳转到页面：${escapeHtml(rawTarget)}${rawAnchor ? ' #' + escapeHtml(rawAnchor) : ''}">📄 ${escapeHtml(label)}</button>`;
   });
 
-  // Standard Markdown Links [label](url)
-  safe = safe.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+  // Standard Markdown Links [label](url) with safe scheme whitelist
+  safe = safe.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, label, rawUrl) => {
+    if (!isSafeLinkUrl(String(rawUrl))) {
+      return `<span>${label}</span>`;
+    }
+    return `<a href="${rawUrl}" target="_blank" rel="noopener noreferrer">${label}</a>`;
+  });
 
   // Bold **text**
   safe = safe.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');

@@ -48,17 +48,8 @@
         </div>
       </div>
       <div class="tag-bar-right">
-        <span v-if="backfillMessage" class="backfill-msg">{{ backfillMessage }}</span>
-        <button
-          class="btn btn-secondary btn-sm backfill-btn"
-          type="button"
-          :disabled="backfilling"
-          title="扫描未打标文档并利用语义自动补齐标签"
-          @click="triggerBackfill"
-        >
-          <Icon name="sparkles" :size="13" :spin="backfilling" />
-          <span>{{ backfilling ? '补标中...' : '一键补标' }}</span>
-        </button>
+        <span v-if="tagActionMessage" class="backfill-msg">{{ tagActionMessage }}</span>
+        <span class="muted" style="font-size: 12px">点击标签可按类筛选</span>
       </div>
     </div>
 
@@ -72,105 +63,54 @@
     </div>
 
     <div v-else class="grid">
-      <!-- Files section -->
-      <section class="card panel">
+      <section v-for="sec in sections" :key="sec.type" class="card panel">
         <div class="panel-h">
           <div class="panel-title">
-            <Icon name="file" :size="16" />
-            <h2>文件</h2>
+            <Icon :name="sec.icon" :size="16" />
+            <h2>{{ sec.label }}</h2>
           </div>
-          <span class="badge">{{ filteredFiles.length }} / {{ files.total || 0 }}</span>
+          <span class="badge">{{ filteredByType(sec.type).length }} / {{ byType(sec.type).length }}</span>
         </div>
-        <div v-if="!filteredFiles.length" class="empty muted">
-          <div class="empty-glyph"><Icon name="file" :size="20" /></div>
-          {{ activeTag ? `无带有 #${activeTag} 的文件` : '暂无文件' }}
+        <div v-if="!filteredByType(sec.type).length" class="empty muted">
+          <div class="empty-glyph"><Icon :name="sec.rowIcon" :size="20" /></div>
+          {{ activeTag ? `无带有 #${activeTag} 的${sec.label}` : `暂无${sec.label}` }}
         </div>
         <ul v-else>
-          <li v-for="f in filteredFiles" :key="f.file_id || f.id || (f.file_url + f.filename)">
-            <div class="row-ico"><Icon name="file" :size="16" /></div>
+          <li v-for="item in filteredByType(sec.type)" :key="item.id">
+            <div class="row-ico"><Icon :name="sec.rowIcon" :size="16" /></div>
             <div class="row-body">
               <div class="row-main">
-                <strong>{{ f.filename }}</strong>
-                <StatusDot :status="f.status" />
+                <strong>{{ item.title || item.filename || item.source_url }}</strong>
+                <div style="display: inline-flex; align-items: center; gap: 6px">
+                  <StatusDot :status="item.status || '-'" />
+                  <button
+                    class="tag-edit-btn"
+                    title="删除资源"
+                    @click.stop="removeResource(item)"
+                  >
+                    <Icon name="x" :size="12" />
+                  </button>
+                </div>
               </div>
-              <div class="muted meta">{{ formatDate(f.created_at) }}</div>
+              <div class="muted meta" :class="{ mono: sec.type === 'link' }">
+                {{ sec.type === 'link' ? item.source_url : (item.filename || formatDate(item.created_at)) }}
+              </div>
 
-              <!-- Tags display & inline edit -->
-              <div v-if="editingKey === getItemKey(f, 'file')" class="inline-tag-edit" @click.stop>
+              <div v-if="editingKey === item.id" class="inline-tag-edit" @click.stop>
                 <input
                   v-model="editingInput"
                   ref="tagInputRef"
                   class="inline-tag-input"
                   placeholder="标签，空格/逗号分隔..."
-                  @keydown.enter="saveTags(f, 'file')"
+                  @keydown.enter="saveTags(item)"
                   @keydown.esc="cancelEdit"
                 />
-                <button class="btn btn-xs btn-primary" :disabled="savingTags" @click="saveTags(f, 'file')">保存</button>
+                <button class="btn btn-xs btn-primary" :disabled="savingTags" @click="saveTags(item)">保存</button>
                 <button class="btn btn-xs btn-secondary" @click="cancelEdit">取消</button>
               </div>
               <div v-else class="item-tags">
                 <span
-                  v-for="t in f.tags || []"
-                  :key="t"
-                  class="tag-badge"
-                  :class="{ active: activeTag === t }"
-                  @click.stop="activeTag = activeTag === t ? null : t"
-                >
-                  #{{ t }}
-                </span>
-                <button
-                  v-if="f.id"
-                  class="tag-edit-btn"
-                  title="编辑标签"
-                  @click.stop="startEdit(f, 'file')"
-                >
-                  <Icon name="tag" :size="11" />
-                </button>
-              </div>
-            </div>
-          </li>
-        </ul>
-      </section>
-
-      <!-- Notes section -->
-      <section class="card panel">
-        <div class="panel-h">
-          <div class="panel-title">
-            <Icon name="note" :size="16" />
-            <h2>笔记</h2>
-          </div>
-          <span class="badge">{{ filteredNotes.length }} / {{ notes.total || 0 }}</span>
-        </div>
-        <div v-if="!filteredNotes.length" class="empty muted">
-          <div class="empty-glyph"><Icon name="note" :size="20" /></div>
-          {{ activeTag ? `无带有 #${activeTag} 的笔记` : '暂无笔记' }}
-        </div>
-        <ul v-else>
-          <li v-for="n in filteredNotes" :key="n.id">
-            <div class="row-ico"><Icon name="note" :size="16" /></div>
-            <div class="row-body">
-              <div class="row-main">
-                <strong>{{ n.title }}</strong>
-                <StatusDot :status="n.status || '-'" />
-              </div>
-              <div class="muted meta">{{ n.filename }}</div>
-
-              <!-- Tags display & inline edit -->
-              <div v-if="editingKey === getItemKey(n, 'note')" class="inline-tag-edit" @click.stop>
-                <input
-                  v-model="editingInput"
-                  ref="tagInputRef"
-                  class="inline-tag-input"
-                  placeholder="标签，空格/逗号分隔..."
-                  @keydown.enter="saveTags(n, 'note')"
-                  @keydown.esc="cancelEdit"
-                />
-                <button class="btn btn-xs btn-primary" :disabled="savingTags" @click="saveTags(n, 'note')">保存</button>
-                <button class="btn btn-xs btn-secondary" @click="cancelEdit">取消</button>
-              </div>
-              <div v-else class="item-tags">
-                <span
-                  v-for="t in n.tags || []"
+                  v-for="t in item.tags || []"
                   :key="t"
                   class="tag-badge"
                   :class="{ active: activeTag === t }"
@@ -181,66 +121,7 @@
                 <button
                   class="tag-edit-btn"
                   title="编辑标签"
-                  @click.stop="startEdit(n, 'note')"
-                >
-                  <Icon name="tag" :size="11" />
-                </button>
-              </div>
-            </div>
-          </li>
-        </ul>
-      </section>
-
-      <!-- Links section -->
-      <section class="card panel">
-        <div class="panel-h">
-          <div class="panel-title">
-            <Icon name="globe" :size="16" />
-            <h2>链接</h2>
-          </div>
-          <span class="badge">{{ filteredLinks.length }} / {{ links.total || 0 }}</span>
-        </div>
-        <div v-if="!filteredLinks.length" class="empty muted">
-          <div class="empty-glyph"><Icon name="link" :size="20" /></div>
-          {{ activeTag ? `无带有 #${activeTag} 的链接` : '暂无链接' }}
-        </div>
-        <ul v-else>
-          <li v-for="l in filteredLinks" :key="l.id">
-            <div class="row-ico"><Icon name="link" :size="16" /></div>
-            <div class="row-body">
-              <div class="row-main">
-                <strong>{{ l.title || l.url }}</strong>
-                <StatusDot :status="l.status" />
-              </div>
-              <div class="muted mono meta">{{ l.url }}</div>
-
-              <!-- Tags display & inline edit -->
-              <div v-if="editingKey === getItemKey(l, 'link')" class="inline-tag-edit" @click.stop>
-                <input
-                  v-model="editingInput"
-                  ref="tagInputRef"
-                  class="inline-tag-input"
-                  placeholder="标签，空格/逗号分隔..."
-                  @keydown.enter="saveTags(l, 'link')"
-                  @keydown.esc="cancelEdit"
-                />
-                <button class="btn btn-xs btn-primary" :disabled="savingTags" @click="saveTags(l, 'link')">保存</button>
-                <button class="btn btn-xs btn-secondary" @click="cancelEdit">取消</button>
-              </div>
-              <div v-else class="item-tags">
-                <span
-                  v-for="t in l.tags || []"
-                  :key="t"
-                  class="tag-badge"
-                  :class="{ active: activeTag === t }"
-                  @click.stop="activeTag = activeTag === t ? null : t"
-                >
-                  #{{ t }}
-                </span>
-                <button
-                  class="tag-edit-btn"
-                  title="编辑标签"
-                  @click.stop="startEdit(l, 'link')"
+                  @click.stop="startEdit(item)"
                 >
                   <Icon name="tag" :size="11" />
                 </button>
@@ -254,73 +135,51 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onBeforeUnmount, computed, nextTick } from 'vue'
+import { ref, onMounted, computed, nextTick } from 'vue'
 import { useAuthStore } from '../stores/auth'
 import {
-  listFiles,
-  listNotes,
-  listLinks,
+  listResources,
+  deleteResource,
   getTags,
   updateResourceTags,
-  backfillTags,
 } from '../api/client'
 import Icon from '../components/Icon.vue'
 import StatusDot from '../components/StatusDot.vue'
 
+const sections = [
+  { type: 'file', label: '文件', icon: 'file', rowIcon: 'file' },
+  { type: 'note', label: '笔记', icon: 'note', rowIcon: 'note' },
+  { type: 'link', label: '链接', icon: 'globe', rowIcon: 'link' },
+]
+
 const auth = useAuthStore()
 const loading = ref(false)
 const error = ref('')
-const files = ref({ files: [], total: 0 })
-const notes = ref({ notes: [], total: 0 })
-const links = ref({ links: [], total: 0 })
+const resources = ref([])
+const totalCount = ref(0)
 const tagSummary = ref([])
 const activeTag = ref(null)
-
-const backfilling = ref(false)
-const backfillMessage = ref('')
+const tagActionMessage = ref('')
 
 const editingKey = ref(null)
 const editingInput = ref('')
 const savingTags = ref(false)
 const tagInputRef = ref(null)
 
-const hasAny = computed(() => {
-  return (
-    (files.value.files?.length || 0) +
-      (notes.value.notes?.length || 0) +
-      (links.value.links?.length || 0) >
-    0
-  )
-})
+const hasAny = computed(() => resources.value.length > 0)
 
-const totalCount = computed(() => {
-  return (files.value.total || 0) + (notes.value.total || 0) + (links.value.total || 0)
-})
-
-const filteredFiles = computed(() => {
-  const list = files.value.files || []
-  if (!activeTag.value) return list
-  return list.filter((f) => (f.tags || []).includes(activeTag.value))
-})
-
-const filteredNotes = computed(() => {
-  const list = notes.value.notes || []
-  if (!activeTag.value) return list
-  return list.filter((n) => (n.tags || []).includes(activeTag.value))
-})
-
-const filteredLinks = computed(() => {
-  const list = links.value.links || []
-  if (!activeTag.value) return list
-  return list.filter((l) => (l.tags || []).includes(activeTag.value))
-})
-
-function getItemKey(item, type) {
-  return `${type}:${item.id || item.filename || item.url}`
+function byType(type) {
+  return resources.value.filter((r) => r.type === type)
 }
 
-function startEdit(item, type) {
-  editingKey.value = getItemKey(item, type)
+function filteredByType(type) {
+  const list = byType(type)
+  if (!activeTag.value) return list
+  return list.filter((item) => (item.tags || []).includes(activeTag.value))
+}
+
+function startEdit(item) {
+  editingKey.value = item.id
   editingInput.value = (item.tags || []).join(', ')
   nextTick(() => {
     if (tagInputRef.value) {
@@ -338,7 +197,7 @@ function cancelEdit() {
   editingInput.value = ''
 }
 
-async function saveTags(item, type) {
+async function saveTags(item) {
   if (!item.id) return
   savingTags.value = true
   try {
@@ -346,7 +205,7 @@ async function saveTags(item, type) {
       .split(/[,，\s]+/)
       .map((s) => s.trim().replace(/^#+/, ''))
       .filter(Boolean)
-    const res = await updateResourceTags(auth.token, type, item.id, rawList)
+    const res = await updateResourceTags(auth.token, 'resource', item.id, rawList)
     item.tags = res.tags || []
     cancelEdit()
     await refreshTags()
@@ -357,34 +216,15 @@ async function saveTags(item, type) {
   }
 }
 
-let backfillTimer = null
-
-onBeforeUnmount(() => {
-  if (backfillTimer) {
-    clearTimeout(backfillTimer)
-    backfillTimer = null
-  }
-})
-
-async function triggerBackfill() {
-  backfilling.value = true
-  backfillMessage.value = ''
-  if (backfillTimer) {
-    clearTimeout(backfillTimer)
-    backfillTimer = null
-  }
+async function removeResource(item) {
+  if (!window.confirm(`确定删除 "${item.title || item.filename || item.source_url}"？`)) return
   try {
-    const res = await backfillTags(auth.token)
-    backfillMessage.value = `已为 ${res.enqueued_count || 0} 个资源自动补齐标签`
-    await reload()
-    backfillTimer = setTimeout(() => {
-      backfillMessage.value = ''
-      backfillTimer = null
-    }, 4000)
+    await deleteResource(auth.token, item.id)
+    resources.value = resources.value.filter((r) => r.id !== item.id)
+    totalCount.value = resources.value.length
+    await refreshTags()
   } catch (err) {
-    error.value = '一键补标失败: ' + err.message
-  } finally {
-    backfilling.value = false
+    error.value = '删除资源失败: ' + err.message
   }
 }
 
@@ -403,8 +243,8 @@ async function refreshTags() {
   try {
     const res = await getTags(auth.token)
     tagSummary.value = res.tags || []
-  } catch (e) {
-    // Silently log or ignore
+  } catch {
+    // ignore tag refresh error
   }
 }
 
@@ -412,14 +252,9 @@ async function reload() {
   loading.value = true
   error.value = ''
   try {
-    const [f, n, l] = await Promise.all([
-      listFiles(auth.token),
-      listNotes(auth.token),
-      listLinks(auth.token),
-    ])
-    files.value = f || { files: [], total: 0 }
-    notes.value = n || { notes: [], total: 0 }
-    links.value = l || { links: [], total: 0 }
+    const res = await listResources(auth.token, { limit: 200 })
+    resources.value = res?.resources || []
+    totalCount.value = res?.total ?? resources.value.length
     await refreshTags()
   } catch (e) {
     error.value = e.message

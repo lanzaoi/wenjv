@@ -12,6 +12,7 @@
     "typecheck": "pnpm -r --parallel run typecheck",
     "test": "pnpm -r run test",
     "no-stubs": "bash scripts/no-stubs.sh",
+    "reingest": "pnpm --filter @wenjv/server run reingest --",
     "verify": "pnpm run no-stubs && pnpm run typecheck && pnpm run test"
   },
   "pnpm": {

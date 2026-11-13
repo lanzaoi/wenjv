@@ -1,10 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { setupTestEnv, type TestEnv } from './helper.js';
-import { claimNextJob, executeJob } from '../src/services/jobs.js';
+import { claimNextJob, executeJob, enqueueJob } from '../src/services/jobs.js';
 import { getDb } from '../src/db/index.js';
 import { matchFts5 } from '../src/db/fts5.js';
 
-describe('Files, Notes and Ingestion Pipeline (S0 & S2)', () => {
+describe('Unified Resources, Relational Tags & Ingestion Pipeline (Schema v2)', () => {
   let env: TestEnv;
   let token: string;
   let userId: number;
@@ -39,70 +39,61 @@ describe('Files, Notes and Ingestion Pipeline (S0 & S2)', () => {
     env.cleanup();
   });
 
-  it('uploads a markdown file, processes the ingestion job, and updates search indexes', async () => {
+  it('uploads a file via /resources/files, syncs chunks+FTS5 via triggers, and cascades delete', async () => {
     const formData = new FormData();
     const mdContent = '# 问据开发指南\n\n问据是一个基于 TypeScript 构建的知识库系统。\n\n## 向量模型\n\n本地使用 BGE-M3 进行向量嵌入。';
     const blob = new Blob([mdContent], { type: 'text/markdown' });
     formData.append('file', blob, 'guide.md');
 
-    // 1. Upload file
-    const uploadResp = await env.app.request('/file/upload', {
+    const uploadResp = await env.app.request('/resources/files', {
       method: 'POST',
-      headers: {
-        Authorization: `Bearer ${token}`,
-      },
+      headers: { Authorization: `Bearer ${token}` },
       body: formData,
     });
     expect(uploadResp.status).toBe(201);
-    const fileRecord = (await uploadResp.json()) as { id: number; status: string; filename: string };
-    expect(fileRecord.status).toBe('pending');
-    expect(fileRecord.id).toBeGreaterThan(0);
+    const resRecord = (await uploadResp.json()) as { id: number; type: string; status: string; filename: string };
+    expect(resRecord.type).toBe('file');
+    expect(resRecord.status).toBe('pending');
 
-    // 2. Claim and execute job
     const job = claimNextJob();
     expect(job).not.toBeNull();
-    expect(job!.job_type).toBe('file');
-    expect(job!.resource_id).toBe(fileRecord.id);
+    expect(job!.entity_type).toBe('resource');
+    expect(job!.entity_id).toBe(resRecord.id);
 
     await executeJob(job!);
 
-    // Verify file is marked finished
     const db = getDb();
-    const updatedFile = db.prepare('SELECT status FROM file_uploads WHERE id = ?').get(fileRecord.id) as { status: string };
-    expect(updatedFile.status).toBe('finished');
+    const updated = db.prepare('SELECT status FROM resources WHERE id = ?').get(resRecord.id) as { status: string };
+    expect(updated.status).toBe('finished');
 
-    // Verify polling status by filename
-    const pollResp = await env.app.request(`/file/status/${encodeURIComponent(fileRecord.filename)}`, {
-      method: 'GET',
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    expect(pollResp.status).toBe(200);
-    const pollJson = (await pollResp.json()) as { status: string };
-    expect(pollJson.status).toBe('finished');
+    // Authoritative chunks table & FTS5 trigger sync verification
+    const chunkCount = (
+      db.prepare("SELECT COUNT(*) AS c FROM chunks WHERE entity_type = 'resource' AND entity_id = ?").get(resRecord.id) as { c: number }
+    ).c;
+    expect(chunkCount).toBeGreaterThan(0);
 
-    // Verify job retry rejected on succeeded job with 409
+    const hits = matchFts5(db, 'TypeScript 知识库', { userId });
+    expect(hits.length).toBeGreaterThan(0);
+    expect(hits[0]?.source).toBe(resRecord.filename);
+
+    // Retry on succeeded job rejected with 409
     const retryResp = await env.app.request(`/jobs/${job!.id}/retry`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${token}` },
     });
     expect(retryResp.status).toBe(409);
 
-    // Verify FTS index has chunks
-    const hits = matchFts5(db, 'TypeScript 知识库', { userId });
-    expect(hits.length).toBeGreaterThan(0);
-    expect(hits[0]?.filename).toBe(fileRecord.filename);
-
-    // Verify delete by filename
-    const delFileResp = await env.app.request(`/file/${encodeURIComponent(fileRecord.filename)}`, {
+    // Delete via unified DELETE /resources/:id and verify chunks & FTS trigger purge
+    const delResp = await env.app.request(`/resources/${resRecord.id}`, {
       method: 'DELETE',
       headers: { Authorization: `Bearer ${token}` },
     });
-    expect(delFileResp.status).toBe(200);
-    expect((await delFileResp.json()) as { status: string }).toEqual({ status: 'deleted' });
+    expect(delResp.status).toBe(200);
+    expect(matchFts5(db, 'TypeScript 知识库', { userId }).length).toBe(0);
   });
 
-  it('creates a note, processes ingestion, and retrieves by filename', async () => {
-    const noteResp = await env.app.request('/file/note', {
+  it('creates/updates notes and manages O(1) relational tags via /tags and /resources', async () => {
+    const noteResp = await env.app.request('/resources/notes', {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${token}`,
@@ -110,82 +101,96 @@ describe('Files, Notes and Ingestion Pipeline (S0 & S2)', () => {
       },
       body: JSON.stringify({
         title: '会议随手记',
-        content: '今天讨论了问据向全栈 TypeScript 迁移的执行方案。',
-        tags: ['meeting', 'typescript'],
+        content: '今天讨论了问据 Schema v2 精简方案。',
+        tags: ['meeting', 'v2'],
       }),
     });
     expect(noteResp.status).toBe(201);
-    const noteRecord = (await noteResp.json()) as { id: number; filename: string };
+    const noteRecord = (await noteResp.json()) as { id: number; type: string; tags: string[] };
+    expect(noteRecord.type).toBe('note');
+    expect(noteRecord.tags).toEqual(['meeting', 'v2']);
 
     const job = claimNextJob();
     expect(job).not.toBeNull();
     await executeJob(job!);
 
-    const getNote = await env.app.request(`/file/note/${encodeURIComponent(noteRecord.filename)}`, {
-      method: 'GET',
+    // Unified listing filtered by tag
+    const listByTag = await env.app.request('/resources?tag=meeting', {
       headers: { Authorization: `Bearer ${token}` },
     });
-    expect(getNote.status).toBe(200);
-    const noteData = (await getNote.json()) as { title: string; content: string };
-    expect(noteData.title).toBe('会议随手记');
-    expect(noteData.content).toContain('迁移的执行方案');
+    expect(listByTag.status).toBe(200);
+    const listData = (await listByTag.json()) as { resources: Array<{ id: number }>; total: number };
+    expect(listData.total).toBe(1);
+    expect(listData.resources[0]?.id).toBe(noteRecord.id);
 
-    // List notes
-    const listNotesResp = await env.app.request('/file/note', {
-      method: 'GET',
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    expect(listNotesResp.status).toBe(200);
-    const notesList = (await listNotesResp.json()) as { notes: Array<{ id: number; title: string }>; total: number };
-    expect(notesList.total).toBeGreaterThan(0);
-    expect(notesList.notes.some((n) => n.id === noteRecord.id)).toBe(true);
-
-    // Patch note
-    const patchResp = await env.app.request(`/file/note/${encodeURIComponent(noteRecord.filename)}`, {
+    // Patch note content
+    const patchResp = await env.app.request(`/resources/${noteRecord.id}`, {
       method: 'PATCH',
       headers: {
         Authorization: `Bearer ${token}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ content: '更新后的会议随手记正文。' }),
+      body: JSON.stringify({ content: '更新后的 Schema v2 正文。' }),
     });
     expect(patchResp.status).toBe(200);
-    const patchData = (await patchResp.json()) as { updated: boolean };
-    expect(patchData.updated).toBe(true);
 
-    // Sync notes
-    const syncResp = await env.app.request('/file/note/sync', {
-      method: 'PUT',
+    // O(1) Global Tag Rename via PUT /tags/:id
+    const tagsListResp = await env.app.request('/tags', {
       headers: { Authorization: `Bearer ${token}` },
     });
-    expect(syncResp.status).toBe(200);
+    expect(tagsListResp.status).toBe(200);
+    const tagsData = (await tagsListResp.json()) as { tags: Array<{ id: number; name: string; count: number }> };
+    const meetingTag = tagsData.tags.find((t) => t.name === 'meeting');
+    expect(meetingTag).toBeDefined();
 
-    // Update tags format
-    const updateTagsResp = await env.app.request(`/documents/note/${noteRecord.id}/tags`, {
+    const renameTagResp = await env.app.request(`/tags/${meetingTag!.id}`, {
       method: 'PUT',
       headers: {
         Authorization: `Bearer ${token}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ tags: ['urgent', 'review'] }),
+      body: JSON.stringify({ name: 'weekly-sync', color: '#0ea5e9' }),
     });
-    expect(updateTagsResp.status).toBe(200);
-    expect(await updateTagsResp.json()).toEqual({ tags: ['urgent', 'review'] });
+    expect(renameTagResp.status).toBe(200);
 
-    // Backfill tags format
-    const backfillResp = await env.app.request('/documents/tags/backfill', {
-      method: 'POST',
+    // Resource immediately reflects renamed tag without touching resources table
+    const detailResp = await env.app.request(`/resources/${noteRecord.id}`, {
       headers: { Authorization: `Bearer ${token}` },
     });
-    expect(backfillResp.status).toBe(200);
-    expect(await backfillResp.json()).toEqual({ enqueued_count: 0 });
+    const detailData = (await detailResp.json()) as { tags: string[] };
+    expect(detailData.tags).toContain('weekly-sync');
+    expect(detailData.tags).not.toContain('meeting');
 
-    // Delete note
-    const delNoteResp = await env.app.request(`/file/note/${encodeURIComponent(noteRecord.filename)}`, {
+    // Delete resource cleans entity_tags
+    const delResp = await env.app.request(`/resources/${noteRecord.id}`, {
       method: 'DELETE',
       headers: { Authorization: `Bearer ${token}` },
     });
-    expect(delNoteResp.status).toBe(200);
-    expect((await delNoteResp.json()) as { status: string }).toEqual({ status: 'deleted' });
+    expect(delResp.status).toBe(200);
+
+    const tagsAfterDel = (await (
+      await env.app.request('/tags', { headers: { Authorization: `Bearer ${token}` } })
+    ).json()) as { tags: Array<{ name: string; count: number }> };
+    const syncTag = tagsAfterDel.tags.find((t) => t.name === 'weekly-sync');
+    expect(syncTag?.count).toBe(0);
+  });
+
+  it('enforces partial unique index on pending ingestion_jobs (BUG-14)', () => {
+    const db = getDb();
+
+    const j1 = enqueueJob({ entity_type: 'resource', entity_id: 9001, user_id: userId, user_email: 'bob@example.com' });
+    const j2 = enqueueJob({ entity_type: 'resource', entity_id: 9001, user_id: userId, user_email: 'bob@example.com' });
+    expect(j2.id).toBe(j1.id);
+
+    expect(() => {
+      db.prepare(`
+        INSERT INTO ingestion_jobs(entity_type, entity_id, user_id, user_email, payload, status, attempts, max_attempts)
+        VALUES ('resource', 9001, ?, 'bob@example.com', '{}', 'pending', 0, 3)
+      `).run(userId);
+    }).toThrow(/UNIQUE constraint failed/i);
+
+    db.prepare("UPDATE ingestion_jobs SET status = 'succeeded' WHERE id = ?").run(j1.id);
+    const j3 = enqueueJob({ entity_type: 'resource', entity_id: 9001, user_id: userId, user_email: 'bob@example.com' });
+    expect(j3.id).not.toBe(j1.id);
   });
 });

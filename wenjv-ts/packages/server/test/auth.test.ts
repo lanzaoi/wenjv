@@ -1,4 +1,7 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { loadConfig } from '../src/config.js';
 import { setupTestEnv, type TestEnv } from './helper.js';
 
 describe('Auth & Users Service & Routes (S1)', () => {
@@ -112,5 +115,24 @@ describe('Auth & Users Service & Routes (S1)', () => {
     });
     expect(patchUser.status).toBe(200);
     expect(((await patchUser.json()) as { username: string }).username).toBe('alice_updated');
+  });
+
+  it('honors Python SECRET_KEY from backend.env as JWT_SECRET fallback', () => {
+    const prevSecret = process.env['SECRET_KEY'];
+    const prevJwt = process.env['JWT_SECRET'];
+    delete process.env['SECRET_KEY'];
+    delete process.env['JWT_SECRET'];
+    try {
+      fs.writeFileSync(
+        path.join(env.tmpDir, 'backend.env'),
+        'SECRET_KEY=python-shared-secret-key\nCHAT_MODEL=spark-x2.6\n',
+        'utf8'
+      );
+      const cfg = loadConfig({ BASE_DIR: env.tmpDir });
+      expect(cfg.JWT_SECRET).toBe('python-shared-secret-key');
+    } finally {
+      if (prevSecret !== undefined) process.env['SECRET_KEY'] = prevSecret;
+      if (prevJwt !== undefined) process.env['JWT_SECRET'] = prevJwt;
+    }
   });
 });

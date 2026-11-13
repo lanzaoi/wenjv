@@ -1,9 +1,11 @@
 import crypto from 'node:crypto';
 import { getDb } from '../db/index.js';
 import { matchFts5 } from '../db/fts5.js';
-import { getDocumentStore } from '../vector/document-store.js';
+import { getChunksByIds, type ChunkResourceType } from '../db/chunks.js';
+import { getTextStore } from '../vector/text-store.js';
 import { getEmbedder } from '../ai/bge-m3.js';
 import { getReranker } from '../ai/reranker.js';
+import { getEntityRefsByTags } from './tags.js';
 import { config } from '../config.js';
 
 export interface SearchHit {
@@ -18,15 +20,12 @@ export interface SearchHit {
     page?: string | undefined;
     source_type?: string | undefined;
     resource_id?: string | undefined;
-    belongs_to?: string | undefined;
-    link_id?: string | undefined;
-    chunk_group?: string | undefined;
+    header_path?: string | undefined;
     chunk_order?: number | undefined;
     image_path?: string | undefined;
     image_url?: string | undefined;
     has_image?: boolean | undefined;
     tag_matched?: boolean | undefined;
-    tag_fallback?: boolean | undefined;
   };
 }
 
@@ -37,20 +36,19 @@ export interface SearchOptions {
   includeSources?: string[] | undefined;
   excludeSources?: string[] | undefined;
   windowSize?: number | undefined;
-  sourceType?: string | undefined;
+  sourceType?: ChunkResourceType | undefined;
   tags?: string[] | undefined;
-  lostInTheMiddle?: boolean | undefined;
 }
 
 export function computeQueryHash(options: SearchOptions): string {
   const normPrompt = (options.prompt || '').toLowerCase().trim().replace(/\s+/g, ' ');
   const data = {
     p: normPrompt,
-    inc: options.includeSources?.sort() || null,
-    exc: options.excludeSources?.sort() || null,
+    inc: options.includeSources ? [...options.includeSources].sort() : null,
+    exc: options.excludeSources ? [...options.excludeSources].sort() : null,
     st: options.sourceType || null,
     w: options.windowSize || 5,
-    tg: options.tags?.sort() || null,
+    tg: options.tags ? [...options.tags].sort() : null,
   };
   return crypto.createHash('sha256').update(JSON.stringify(data)).digest('hex').slice(0, 32);
 }
@@ -82,40 +80,54 @@ export async function searchDocuments(options: SearchOptions): Promise<SearchHit
               VALUES (?, ?, 0, 0, 0, ?, 1, NULL)
             `).run(prompt, latencyMs, slicedHits.length);
           } catch {
-            // ignore
+            // ignore query log write errors
           }
           return slicedHits;
         } catch {
-          // ignore corrupted cache
+          // ignore corrupted cache entry
         }
       }
     }
   }
 
-  // 2. FTS5 Search
+  // Optional relational tag pre-filter across resources & wiki pages
+  const hasTagFilter = Boolean(options.tags && options.tags.length > 0 && userId);
+  const tagEntityRefs =
+    hasTagFilter && userId ? getEntityRefsByTags(db, userId, options.tags!) : null;
+  if (hasTagFilter && (!tagEntityRefs || tagEntityRefs.length === 0)) {
+    return [];
+  }
+
+  // 2. FTS5 Search (JOINed to authoritative chunks table)
   const ftsRows = matchFts5(db, prompt, {
     userId,
-    sourceType: options.sourceType,
+    resourceType: options.sourceType,
     includeSources: options.includeSources,
+    entityRefs: tagEntityRefs,
     limit: 50,
   });
 
-  // 3. Dense Vector Search
+  // 3. Slim Dense Vector Search -> batch hydrate from SQLite `chunks`
   const embedder = getEmbedder();
   const queryVec = await embedder.embedQuery(prompt);
-  const docStore = getDocumentStore();
-  const vectorRows = await docStore.search(queryVec, {
+  const textStore = getTextStore();
+  const vectorRows = await textStore.search(queryVec, {
     userId,
-    sourceType: options.sourceType,
-    includeSources: options.includeSources,
+    resourceType: options.sourceType,
+    entityRefs: tagEntityRefs,
     limit: 50,
   });
+
+  const vectorChunkMap = getChunksByIds(
+    db,
+    vectorRows.map((v) => v.id),
+    userId
+  );
 
   // 4. Reciprocal Rank Fusion (RRF)
   const k = 60;
   const rrfScores = new Map<string, { score: number; content: string; meta: SearchHit['metadata'] }>();
 
-  // Add FTS ranks
   ftsRows.forEach((row, rank) => {
     const id = row.chunk_id;
     const rrf = 1.0 / (k + (rank + 1));
@@ -125,47 +137,50 @@ export async function searchDocuments(options: SearchOptions): Promise<SearchHit
     } else {
       rrfScores.set(id, {
         score: rrf,
-        content: row.page_content,
+        content: row.content,
         meta: {
           id,
           title: row.title,
-          filename: row.filename,
-          source: row.belongs_to || row.filename,
-          source_type: row.source_type || undefined,
-          resource_id: row.resource_id || undefined,
-          belongs_to: row.belongs_to || undefined,
-          link_id: row.link_id || undefined,
+          filename: row.source,
+          source: row.source,
+          page: String(row.page_number),
+          source_type: row.resource_type,
+          resource_id: String(row.entity_id),
+          header_path: row.header_path,
+          chunk_order: row.chunk_order,
+          tag_matched: hasTagFilter || undefined,
         },
       });
     }
   });
 
-  // Add Vector ranks
-  vectorRows.forEach((row, rank) => {
-    const id = row.id;
+  vectorRows.forEach((vRow, rank) => {
+    const chunk = vectorChunkMap.get(vRow.id);
+    if (!chunk) return;
+    if (options.includeSources && options.includeSources.length > 0) {
+      const incSet = new Set(options.includeSources.filter(Boolean));
+      if (!incSet.has(chunk.source) && !incSet.has(chunk.title)) return;
+    }
+
     const rrf = 1.0 / (k + (rank + 1));
-    const curr = rrfScores.get(id);
+    const curr = rrfScores.get(chunk.id);
     if (curr) {
       curr.score += rrf;
     } else {
-      rrfScores.set(id, {
+      rrfScores.set(chunk.id, {
         score: rrf,
-        content: row.page_content,
+        content: chunk.content,
         meta: {
-          id,
-          title: row.title,
-          filename: row.filename,
-          source: row.source || row.filename,
-          page: row.page,
-          source_type: row.source_type,
-          resource_id: row.resource_id,
-          belongs_to: row.belongs_to,
-          link_id: row.link_id,
-          chunk_group: row.chunk_group,
-          chunk_order: row.chunk_order,
-          image_path: row.image_path,
-          has_image: Boolean(row.image_path),
-          image_url: row.image_path ? `/api/documents/assets/image?path=${encodeURIComponent(row.image_path)}` : undefined,
+          id: chunk.id,
+          title: chunk.title,
+          filename: chunk.source,
+          source: chunk.source,
+          page: String(chunk.page_number),
+          source_type: chunk.resource_type,
+          resource_id: String(chunk.entity_id),
+          header_path: chunk.header_path,
+          chunk_order: chunk.chunk_order,
+          tag_matched: hasTagFilter || undefined,
         },
       });
     }
@@ -178,7 +193,6 @@ export async function searchDocuments(options: SearchOptions): Promise<SearchHit
     metadata: val.meta,
   }));
 
-  // Filter excluded sources if specified
   if (options.excludeSources && options.excludeSources.length > 0) {
     const exc = new Set(options.excludeSources.map((s) => s.toLowerCase()));
     fusedHits = fusedHits.filter((h) => {
@@ -215,7 +229,6 @@ export async function searchDocuments(options: SearchOptions): Promise<SearchHit
   const finalHits = fusedHits.slice(0, windowSize);
   const latencyMs = Date.now() - startTime;
 
-  // Log query
   try {
     db.prepare(`
       INSERT INTO query_logs("query", latency_ms, v_hits, fts5_hits, s_hits, total_hits, cache_hit, error)
@@ -225,7 +238,6 @@ export async function searchDocuments(options: SearchOptions): Promise<SearchHit
     // ignore
   }
 
-  // Save query cache
   if (userId && finalHits.length > 0) {
     try {
       const expiresAt = new Date(Date.now() + 300 * 1000).toISOString();

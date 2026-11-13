@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import { getDb } from '../db/index.js';
 import { authMiddleware, type AuthUser } from '../auth/middleware.js';
-import { getJob, enqueueJob, type IngestionJobRecord } from '../services/jobs.js';
+import { getJob, markEntityPending, type IngestionJobRecord } from '../services/jobs.js';
 
 export const jobsRouter = new Hono();
 
@@ -39,17 +39,9 @@ jobsRouter.post('/:id/retry', authMiddleware, (c) => {
     return c.json({ detail: `Cannot retry job in status '${job.status}'` }, 409);
   }
 
-  const db = getDb();
-  if (job.job_type === 'file') {
-    db.prepare("UPDATE file_uploads SET status = 'pending', error_message = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(job.resource_id);
-  } else if (job.job_type === 'note') {
-    db.prepare("UPDATE notes SET status = 'pending', error_message = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(job.resource_id);
-  } else if (job.job_type === 'link') {
-    db.prepare("UPDATE links SET status = 'pending', error_message = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(job.resource_id);
-  } else if (job.job_type === 'wiki') {
-    db.prepare("UPDATE wiki_pages SET index_status = 'pending', updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(job.resource_id);
-  }
+  markEntityPending(job.entity_type, job.entity_id);
 
+  const db = getDb();
   db.prepare(`
     UPDATE ingestion_jobs
     SET status = 'pending',

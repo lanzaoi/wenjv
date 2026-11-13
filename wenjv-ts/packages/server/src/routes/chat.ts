@@ -5,18 +5,128 @@ import { Hono } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import sharp from 'sharp';
 import { authMiddleware, type AuthUser } from '../auth/middleware.js';
+import { getDb } from '../db/index.js';
+import type { ChunkResourceType } from '../db/chunks.js';
 import { searchDocuments, type SearchHit } from '../services/search.js';
-import { streamChatCompletions, type ChatMessage } from '../ai/llm-chat.js';
+import { streamChatCompletions, type ChatImagePart, type ChatMessage } from '../ai/llm-chat.js';
 import { SigLIP2Engine } from '../ai/siglip2.js';
 import { getVisualStore } from '../vector/visual-store.js';
+import { registerAsset, getAssetsByIds } from '../services/assets.js';
 import { config } from '../config.js';
 
 export const chatRouter = new Hono();
 
+interface RawHistoryMessage {
+  role: 'user' | 'assistant' | 'system';
+  content: string;
+  images?: string[];
+}
+
+async function standardizeImagePart(rawBuffer: Buffer): Promise<ChatImagePart> {
+  const stdBytes = await sharp(rawBuffer)
+    .rotate()
+    .resize(1280, 1280, { fit: 'inside', withoutEnlargement: true })
+    .jpeg({ quality: 85 })
+    .toBuffer();
+  return {
+    data: stdBytes.toString('base64'),
+    mime_type: 'image/jpeg',
+  };
+}
+
+async function resolveImageIdentifier(identifier: string, userId: number): Promise<ChatImagePart | null> {
+  if (!identifier || typeof identifier !== 'string') return null;
+  let candidate = identifier.trim();
+  if (!candidate) return null;
+
+  // Case 1: Data URI
+  if (candidate.startsWith('data:image/') && candidate.includes(';base64,')) {
+    const [, b64] = candidate.split(';base64,', 2);
+    if (!b64) return null;
+    try {
+      return await standardizeImagePart(Buffer.from(b64, 'base64'));
+    } catch {
+      return null;
+    }
+  }
+
+  // Case 2: Extract ?path=... query parameter from API URL
+  if (candidate.includes('path=')) {
+    try {
+      const parsedUrl = new URL(candidate, 'http://localhost');
+      const pathParam = parsedUrl.searchParams.get('path');
+      if (pathParam) candidate = pathParam;
+    } catch {
+      // keep candidate as-is
+    }
+  }
+
+  // Case 3: Local file path within resolvedUploadDir (with session tenant isolation)
+  const uploadRoot = path.resolve(config.resolvedUploadDir);
+  const cleaned = candidate.replace(/^\/+/, '');
+  const tryPaths = [
+    path.isAbsolute(candidate) ? path.resolve(candidate) : path.resolve(uploadRoot, cleaned),
+    path.resolve(uploadRoot, 'mm_assets', cleaned),
+  ];
+
+  for (const target of tryPaths) {
+    if (!target.startsWith(uploadRoot + path.sep) && target !== uploadRoot) {
+      continue;
+    }
+    const rel = path.relative(uploadRoot, target);
+    const parts = rel.split(path.sep);
+    if (parts.length >= 3 && parts[0] === 'mm_assets' && parts[1] === 'sessions') {
+      if (parts[2] !== String(userId)) {
+        continue;
+      }
+    }
+    try {
+      if (fs.existsSync(target) && fs.statSync(target).isFile()) {
+        const raw = fs.readFileSync(target);
+        return await standardizeImagePart(raw);
+      }
+    } catch {
+      // ignore invalid image
+    }
+  }
+
+  return null;
+}
+
+async function resolveHistoryWithDecay(history: RawHistoryMessage[], userId: number): Promise<ChatMessage[]> {
+  const trimmed = history.slice(-8);
+  const out: ChatMessage[] = [];
+  for (let idx = 0; idx < trimmed.length; idx++) {
+    const item = trimmed[idx]!;
+    const distFromLatest = trimmed.length - 1 - idx;
+    const rawImgs = Array.isArray(item.images) ? item.images : [];
+    const msg: ChatMessage = {
+      role: item.role,
+      content: String(item.content || ''),
+    };
+    if (rawImgs.length > 0) {
+      if (distFromLatest < 2) {
+        const resolved: ChatImagePart[] = [];
+        for (const imgId of rawImgs) {
+          const part = await resolveImageIdentifier(String(imgId), userId);
+          if (part) resolved.push(part);
+        }
+        if (resolved.length > 0) {
+          msg.images = resolved;
+        }
+      } else if (!msg.content.includes('[历史附图')) {
+        msg.content = `${msg.content}\n[历史附图: ${rawImgs.length} 张 (已阅，已衰减)]`;
+      }
+    }
+    out.push(msg);
+  }
+  return out;
+}
+
 // GET /models
 chatRouter.get('/models', authMiddleware, (c) => {
   return c.json({
-    models: [config.CHAT_MODEL, 'spark-x2.6'].filter(Boolean),
+    models: Array.from(new Set([config.CHAT_MODEL, 'spark-x2.6'].filter(Boolean))),
   });
 });
 
@@ -74,9 +184,22 @@ chatRouter.post('/attachments', authMiddleware, async (c) => {
   fs.writeFileSync(targetPath, stdBytes);
 
   const relPath = `mm_assets/sessions/${uidStr}/${safeSession}/${mediaId}`;
-  const mediaUrl = `/api/documents/assets/image?path=${encodeURIComponent(relPath)}`;
+  const asset = await registerAsset({
+    userId: user.id,
+    ownerType: 'chat',
+    ownerId: safeSession,
+    filename: origName,
+    relPath,
+    absPath: targetPath,
+    mimeType: 'image/jpeg',
+    size: stdBytes.length,
+    caption: origName,
+  });
+
+  const mediaUrl = `/api/assets/image?path=${encodeURIComponent(relPath)}`;
 
   return c.json({
+    asset_id: asset.id,
     media_url: mediaUrl,
     media_id: mediaId,
     filename: origName,
@@ -98,13 +221,13 @@ chatRouter.post('/by-image', authMiddleware, async (c) => {
   const prompt = typeof body['prompt'] === 'string' ? body['prompt'].trim() : '';
   const model = typeof body['model'] === 'string' ? body['model'] : config.CHAT_MODEL;
   const windowSize = body['window_size'] ? parseInt(String(body['window_size']), 10) : 5;
-  const sourceType = typeof body['source_type'] === 'string' ? body['source_type'] : undefined;
   const useRag = String(body['use_rag'] ?? 'true') !== 'false';
 
-  let history: Array<{ role: 'user' | 'assistant' | 'system'; content: string }> = [];
+  let history: RawHistoryMessage[] = [];
   if (typeof body['history'] === 'string') {
     try {
-      history = JSON.parse(body['history']);
+      const parsedHist = JSON.parse(body['history']);
+      if (Array.isArray(parsedHist)) history = parsedHist as RawHistoryMessage[];
     } catch {
       history = [];
     }
@@ -113,6 +236,13 @@ chatRouter.post('/by-image', authMiddleware, async (c) => {
   const arrayBuf = await file.arrayBuffer();
   const imgBuffer = Buffer.from(arrayBuf);
   const question = prompt || '请详细分析并说明这张图片的内容与关键信息。';
+
+  let uploadedImagePart: ChatImagePart | null = null;
+  try {
+    uploadedImagePart = await standardizeImagePart(imgBuffer);
+  } catch {
+    uploadedImagePart = null;
+  }
 
   return streamSSE(c, async (stream) => {
     let citations: Array<Record<string, unknown>> = [];
@@ -126,28 +256,41 @@ chatRouter.post('/by-image', authMiddleware, async (c) => {
         const visHits = await vStore.search(queryVector, {
           limit: windowSize,
           userId: user.id,
-          belongsTo: user.email,
-          sourceType,
         });
 
-        citations = visHits.map((hit, idx) => ({
+        const db = getDb();
+        const assetMap = getAssetsByIds(
+          db,
+          visHits.map((h) => h.id),
+          user.id
+        );
+
+        const hydrated = visHits
+          .map((hit) => {
+            const asset = assetMap.get(hit.id);
+            return asset ? { hit, asset } : null;
+          })
+          .filter((x): x is NonNullable<typeof x> => x !== null);
+
+        citations = hydrated.map(({ hit, asset }, idx) => ({
           index: idx + 1,
-          source: hit.source || hit.filename || 'visual',
-          page: hit.page || '1',
-          title: hit.title || hit.filename || 'Visual Document',
-          filename: hit.filename || '',
-          source_type: hit.source_type || 'visual',
-          score: hit.score || 0,
-          snippet: hit.page_content.slice(0, 400),
-          page_content: hit.page_content,
-          has_image: Boolean(hit.image_path),
-          image_path: hit.image_path || null,
-          image_url: hit.image_path ? `/documents/assets/image?path=${encodeURIComponent(hit.image_path)}` : null,
+          source: asset.filename,
+          page: '1',
+          title: asset.caption || asset.filename,
+          filename: asset.filename,
+          source_type: asset.owner_type,
+          resource_id: asset.owner_id,
+          score: hit.score,
+          snippet: (asset.caption || asset.filename).slice(0, 400),
+          page_content: asset.caption || asset.filename,
+          has_image: true,
+          image_path: asset.file_path,
+          image_url: `/api/assets/image?id=${encodeURIComponent(asset.id)}`,
         }));
 
-        const contextParts = visHits.map((h, i) => {
-          const title = h.title || h.filename || `Visual ${i + 1}`;
-          return `[${i + 1}] ${title}\n${h.page_content}`;
+        const contextParts = hydrated.map(({ asset }, i) => {
+          const title = asset.caption || asset.filename || `Visual ${i + 1}`;
+          return `[${i + 1}] ${title}\n${asset.caption || asset.filename}`;
         });
         contextBlock = contextParts.join('\n\n---\n\n');
       } catch (err: unknown) {
@@ -163,26 +306,29 @@ chatRouter.post('/by-image', authMiddleware, async (c) => {
     });
 
     const messages: ChatMessage[] = [];
+    const resolvedHistory = await resolveHistoryWithDecay(history, user.id);
     if (contextBlock.trim()) {
       messages.push({
         role: 'system',
         content:
           'You are a multimodal document assistant. Answer using the provided visual context and user query.',
       });
-      messages.push(...history.slice(-8));
+      messages.push(...resolvedHistory);
       messages.push({
         role: 'user',
         content: `Visual Context:\n${contextBlock}\n\nQuestion: ${question}\n\nAnswer:`,
+        ...(uploadedImagePart ? { images: [uploadedImagePart] } : {}),
       });
     } else {
       messages.push({
         role: 'system',
         content: 'You are a helpful multimodal assistant.',
       });
-      messages.push(...history.slice(-8));
+      messages.push(...resolvedHistory);
       messages.push({
         role: 'user',
         content: question,
+        ...(uploadedImagePart ? { images: [uploadedImagePart] } : {}),
       });
     }
 
@@ -218,13 +364,20 @@ chatRouter.post('/', authMiddleware, async (c) => {
   const model = json.model ? String(json.model) : config.CHAT_MODEL;
   const windowSize = json.window_size ? parseInt(json.window_size, 10) : 5;
   const useRag = json.use_rag !== false;
-  const sourceType = json.source_type ? String(json.source_type) : undefined;
+  const rawSt = json.type ?? json.source_type;
+  const sourceType: ChunkResourceType | undefined =
+    rawSt === 'file' || rawSt === 'note' || rawSt === 'link' || rawSt === 'wiki' ? rawSt : undefined;
   const includeSources = Array.isArray(json.include_sources) ? json.include_sources : undefined;
   const excludeSources = Array.isArray(json.exclude_sources) ? json.exclude_sources : undefined;
   const tags = Array.isArray(json.tags) ? json.tags : undefined;
-  const history: Array<{ role: 'user' | 'assistant' | 'system'; content: string }> = Array.isArray(json.history)
-    ? json.history
-    : [];
+  const history: RawHistoryMessage[] = Array.isArray(json.history) ? json.history : [];
+  const rawImages: string[] = Array.isArray(json.images) ? json.images.map(String) : [];
+
+  const currentImages: ChatImagePart[] = [];
+  for (const imgId of rawImages) {
+    const resolved = await resolveImageIdentifier(imgId, user.id);
+    if (resolved) currentImages.push(resolved);
+  }
 
   return streamSSE(c, async (stream) => {
     let citations: Array<Record<string, unknown>> = [];
@@ -250,14 +403,14 @@ chatRouter.post('/', authMiddleware, async (c) => {
           title: hit.metadata.title || hit.metadata.filename || 'Document',
           filename: hit.metadata.filename || '',
           source_type: hit.metadata.source_type || 'file',
+          resource_id: hit.metadata.resource_id || undefined,
           score: hit.score,
           snippet: hit.page_content.slice(0, 400),
           page_content: hit.page_content,
           tag_matched: Boolean(hit.metadata.tag_matched),
-          tag_fallback: Boolean(hit.metadata.tag_fallback),
           has_image: Boolean(hit.metadata.image_path),
           image_path: hit.metadata.image_path || null,
-          image_url: hit.metadata.image_path ? `/documents/assets/image?path=${encodeURIComponent(hit.metadata.image_path)}` : null,
+          image_url: hit.metadata.image_path ? `/api/assets/image?path=${encodeURIComponent(hit.metadata.image_path)}` : null,
         }));
 
         const contextParts = hits.map((h, i) => {
@@ -278,26 +431,29 @@ chatRouter.post('/', authMiddleware, async (c) => {
     });
 
     const messages: ChatMessage[] = [];
+    const resolvedHistory = await resolveHistoryWithDecay(history, user.id);
     if (contextBlock.trim()) {
       messages.push({
         role: 'system',
         content:
           'You are a document Q&A assistant. Answer using ONLY the provided context. If the answer is not in the context, say you cannot answer based on the provided context. Cite sources like [1], [2] when useful.',
       });
-      messages.push(...history.slice(-8));
+      messages.push(...resolvedHistory);
       messages.push({
         role: 'user',
         content: `Context:\n${contextBlock}\n\nQuestion: ${question}\n\nAnswer:`,
+        ...(currentImages.length > 0 ? { images: currentImages } : {}),
       });
     } else {
       messages.push({
         role: 'system',
         content: 'You are a helpful Q&A assistant.',
       });
-      messages.push(...history.slice(-8));
+      messages.push(...resolvedHistory);
       messages.push({
         role: 'user',
         content: question,
+        ...(currentImages.length > 0 ? { images: currentImages } : {}),
       });
     }
 

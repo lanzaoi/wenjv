@@ -37,6 +37,15 @@
       <span>{{ error }}</span>
     </div>
 
+    <div v-if="promoteBannerPage" class="success-banner promote-banner">
+      <Icon name="check" :size="15" />
+      <span>已将笔记升级为 Wiki 页面「{{ promoteBannerPage.title }}」</span>
+      <button type="button" class="btn btn-xs btn-primary" @click="openWikiPage(promoteBannerPage.id)">
+        前往 Wiki 查看 →
+      </button>
+      <button type="button" class="promote-banner-close" @click="promoteBannerPage = null">×</button>
+    </div>
+
     <!-- Top Filter & Search Bar -->
     <div class="tag-bar card">
       <div class="tag-bar-top">
@@ -252,8 +261,56 @@
               <pre class="detail-content-box">{{ detailContent }}</pre>
             </div>
             <div v-if="reingestMessage" class="detail-info-box">{{ reingestMessage }}</div>
+            <div v-if="promoteOpen" class="detail-promote-box">
+              <div class="detail-promote-head">
+                <Icon name="book" :size="14" />
+                <strong>升级为正式 Wiki 页面</strong>
+              </div>
+              <div v-if="promoteErr" class="detail-err-box">{{ promoteErr }}</div>
+              <div class="detail-promote-fields">
+                <label class="detail-promote-field">
+                  <span>Wiki 页面标题</span>
+                  <input v-model="promoteTitle" type="text" placeholder="请输入 Wiki 标题" :disabled="promoting" />
+                </label>
+                <label class="detail-promote-field">
+                  <span>存放位置（父目录）</span>
+                  <select v-model="promoteParentId" :disabled="promoting">
+                    <option :value="null">根目录</option>
+                    <option v-for="opt in wikiParentOptions" :key="opt.id" :value="opt.id">
+                      {{ opt.prefix }}{{ opt.title }}
+                    </option>
+                  </select>
+                </label>
+                <label class="detail-promote-check">
+                  <input v-model="promoteArchiveOriginal" type="checkbox" :disabled="promoting" />
+                  <span>转正后移出收件箱笔记（避免检索结果重复）</span>
+                </label>
+              </div>
+              <div class="detail-promote-actions">
+                <button type="button" class="btn btn-secondary btn-sm" :disabled="promoting" @click="promoteOpen = false">
+                  取消
+                </button>
+                <button
+                  type="button"
+                  class="btn btn-primary btn-sm"
+                  :disabled="!promoteTitle.trim() || promoting"
+                  @click="confirmPromoteToWiki(selectedResource)"
+                >
+                  {{ promoting ? '升级中…' : '确认升级为 Wiki' }}
+                </button>
+              </div>
+            </div>
           </div>
           <footer class="detail-foot">
+            <button
+              v-if="selectedResource.type === 'note' && !promoteOpen"
+              type="button"
+              class="btn btn-secondary btn-sm promote-wiki-btn"
+              @click="startPromoteToWiki(selectedResource)"
+            >
+              <Icon name="book" :size="14" />
+              <span>升级为 Wiki</span>
+            </button>
             <button
               v-if="selectedResource.type === 'file'"
               type="button"
@@ -308,11 +365,15 @@ import { useLibraryStore } from '../stores/library'
 import { useAuthStore } from '../stores/auth'
 import {
   getResourceDetail,
+  promoteNoteToWiki,
   reingestResource,
   resourceContentUrl,
+  wikiApi,
   type ResourceItem,
   type ResourceType,
 } from '../api/client.js'
+import { flattenWikiTreeOptions, type WikiTreeOption } from '../utils/wiki-tree'
+import type { WikiTreeNode } from '../stores/wiki'
 import Icon from '../components/Icon.vue'
 import StatusDot from '../components/StatusDot.vue'
 import ImportModal from '../components/ImportModal.vue'
@@ -379,6 +440,15 @@ const detailContent = ref('')
 const detailLoading = ref(false)
 const reingesting = ref(false)
 const reingestMessage = ref('')
+
+const promoteOpen = ref(false)
+const promoting = ref(false)
+const promoteErr = ref('')
+const promoteTitle = ref('')
+const promoteParentId = ref<number | null>(null)
+const promoteArchiveOriginal = ref(true)
+const wikiParentOptions = ref<WikiTreeOption[]>([])
+const promoteBannerPage = ref<{ id: number; title: string } | null>(null)
 
 const hasAny = computed(() => resources.value.length > 0)
 const visibleSections = computed(() => {
@@ -455,6 +525,11 @@ async function openDetail(item: ResourceItem) {
   library.selectedResourceId = item.id
   detailContent.value = ''
   reingestMessage.value = ''
+  promoteOpen.value = false
+  promoteErr.value = ''
+  promoteTitle.value = item.title || ''
+  promoteParentId.value = null
+  promoteArchiveOriginal.value = true
   detailLoading.value = true
   try {
     const detail = await getResourceDetail(auth.token, item.id)
@@ -466,6 +541,44 @@ async function openDetail(item: ResourceItem) {
   } finally {
     detailLoading.value = false
   }
+}
+
+async function startPromoteToWiki(item: ResourceItem) {
+  promoteOpen.value = true
+  promoteErr.value = ''
+  promoteTitle.value = item.title || '未命名笔记'
+  promoteParentId.value = null
+  try {
+    const raw = await wikiApi.getTree(auth.token || '')
+    const treeNodes: WikiTreeNode[] = Array.isArray(raw) ? raw : raw?.tree || []
+    wikiParentOptions.value = flattenWikiTreeOptions(treeNodes)
+  } catch {
+    wikiParentOptions.value = []
+  }
+}
+
+async function confirmPromoteToWiki(item: ResourceItem) {
+  if (!item?.id || promoting.value || !promoteTitle.value.trim()) return
+  promoting.value = true
+  promoteErr.value = ''
+  try {
+    const res = await promoteNoteToWiki(auth.token, item.id, {
+      title: promoteTitle.value.trim(),
+      parent_id: promoteParentId.value,
+      archive_original: promoteArchiveOriginal.value,
+    })
+    promoteBannerPage.value = { id: res.page.id, title: res.page.title }
+    closeDetail()
+    await reload({ silent: true })
+  } catch (err) {
+    promoteErr.value = '升级失败: ' + (err instanceof Error ? err.message : String(err))
+  } finally {
+    promoting.value = false
+  }
+}
+
+function openWikiPage(pageId: number) {
+  router.push({ name: 'wiki', params: { id: String(pageId) } })
 }
 
 async function triggerReingest(item: ResourceItem, mode: 'auto' | 'formula' = 'auto') {
@@ -489,6 +602,8 @@ function closeDetail() {
   library.selectedResourceId = null
   detailContent.value = ''
   reingestMessage.value = ''
+  promoteOpen.value = false
+  promoteErr.value = ''
 }
 
 function askDeleteResource(item: ResourceItem) {
@@ -1099,5 +1214,77 @@ li:hover {
 .btn-danger-solid {
   background: var(--danger);
   color: #fff;
+}
+.promote-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+  flex-wrap: wrap;
+}
+.promote-banner-close {
+  margin-left: auto;
+  border: none;
+  background: none;
+  font-size: 16px;
+  color: inherit;
+  cursor: pointer;
+  padding: 0 4px;
+}
+.promote-wiki-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-right: auto;
+}
+.detail-promote-box {
+  margin-top: 4px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.detail-promote-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+}
+.detail-promote-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.detail-promote-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.detail-promote-field input,
+.detail-promote-field select {
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 6px 9px;
+  font-size: 13px;
+  background: var(--surface);
+  color: var(--text);
+}
+.detail-promote-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.detail-promote-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
 }
 </style>

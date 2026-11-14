@@ -207,6 +207,18 @@ export async function reingestResource(
   });
 }
 
+export async function promoteNoteToWiki(
+  token: string | null,
+  resourceId: string | number,
+  payload: { title?: string; parent_id?: number | null; archive_original?: boolean } = {}
+): Promise<{ page: { id: number; title: string; slug: string; parent_id: number | null }; archived_original: boolean }> {
+  return apiJson(`/resources/${resourceId}/promote-to-wiki`, {
+    method: 'POST',
+    token,
+    body: payload,
+  });
+}
+
 export function resourceContentUrl(resourceId: number | string, token?: string | null): string {
   const qs = token ? `?token=${encodeURIComponent(token)}` : '';
   return `/api/resources/${encodeURIComponent(String(resourceId))}/content${qs}`;

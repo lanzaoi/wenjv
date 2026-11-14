@@ -146,11 +146,12 @@ test.describe('wenjv single-port E2E flows', () => {
       .toBeGreaterThan(0);
     await detailDialog.getByRole('button', { name: '关闭' }).last().click();
 
-    // 7. Create a Wiki page
+    // 7. Create a Wiki page and verify Scheme A+B Notes <-> Wiki Bridge
     await page.getByRole('link', { name: 'Wiki' }).click();
     await expect(page).toHaveURL(/\/wiki/);
     await page.getByRole('button', { name: '新建知识页面' }).click();
     await expect(page.locator('.wiki-toast')).toContainText('已创建');
+    await expect(page.locator('.inbox-section')).toContainText('E2E 光合作用原理笔记');
 
     // 8. Return to ChatView and verify KeepAlive preserved draft prompt, then run refs search
     await page.getByRole('link', { name: '对话' }).click();
@@ -162,6 +163,33 @@ test.describe('wenjv single-port E2E flows', () => {
     await composerPrompt.press('Enter');
     await expect(page.locator('.cites')).toBeVisible();
     await expect(page.locator('.cites')).toContainText('光合作用');
+
+    // 8a. Test LibraryView "升级为 Wiki" (keeping original) and WikiView Inbox "一键转正为 Wiki 页面" (archiving original)
+    await page.getByRole('link', { name: '资料库' }).click();
+    await expect(page).toHaveURL(/\/library/);
+    await page.locator('li.resource-row', { hasText: 'E2E 光合作用原理笔记' }).first().click();
+    const noteDialog = page.getByRole('dialog', { name: '资源详情' });
+    await expect(noteDialog).toBeVisible();
+    await noteDialog.getByRole('button', { name: '升级为 Wiki' }).click();
+    await noteDialog.getByPlaceholder('请输入 Wiki 标题').fill('光合作用-资料库副本');
+    await noteDialog.locator('.detail-promote-check input[type="checkbox"]').uncheck();
+    await noteDialog.getByRole('button', { name: '确认升级为 Wiki' }).click();
+    await expect(page.locator('.promote-banner')).toContainText('光合作用-资料库副本');
+    await page.getByRole('button', { name: '前往 Wiki 查看 →' }).click();
+    await expect(page).toHaveURL(/\/wiki\/\d+/);
+    await expect(page.locator('.wiki-tree-panel')).toContainText('光合作用-资料库副本');
+
+    await page.locator('.inbox-item', { hasText: 'E2E 光合作用原理笔记' }).click();
+    await expect(page.locator('.inbox-workbench')).toBeVisible();
+    await expect(page.locator('.inbox-wb-content')).toContainText('卡尔文循环');
+    await page.getByLabel('转正 Wiki 页面标题').fill('光合作用正式 Wiki 页');
+    await page.getByRole('button', { name: '一键转正为 Wiki 页面' }).click();
+    await expect(page.locator('.wiki-toast')).toContainText('光合作用正式 Wiki 页');
+    await expect(page.locator('.wiki-tree-panel .tree-nodes')).toContainText('光合作用正式 Wiki 页');
+    await expect(page.locator('.inbox-item', { hasText: 'E2E 光合作用原理笔记' })).toHaveCount(0);
+
+    await page.getByRole('link', { name: '对话' }).click();
+    await expect(page).toHaveURL(/\/$/);
 
     // 8b. Verify hidden thinking stream + secondary /thinking/:id view + fixed nav/pin icons
     await expect(page.getByRole('link', { name: 'Wiki' }).locator('svg path')).toHaveCount(3);

@@ -7,12 +7,29 @@ import { deleteEntityChunks } from '../db/chunks.js';
 import { getTextStore } from '../vector/text-store.js';
 import { setEntityTags, getEntityTags, deleteEntityTags } from './tags.js';
 import { deleteAssetsByOwner } from './assets.js';
+import { getResource, deleteUserResource } from './resources.js';
 
 export class ConflictError extends Error {
   readonly status = 409;
   constructor(message: string) {
     super(message);
     this.name = 'ConflictError';
+  }
+}
+
+export class NotFoundError extends Error {
+  readonly status = 404;
+  constructor(message: string) {
+    super(message);
+    this.name = 'NotFoundError';
+  }
+}
+
+export class ValidationError extends Error {
+  readonly status = 400;
+  constructor(message: string) {
+    super(message);
+    this.name = 'ValidationError';
   }
 }
 
@@ -328,6 +345,19 @@ export interface CreateWikiPageParams {
   parentId?: number | null | undefined;
   icon?: string | undefined;
   tags?: string[] | undefined;
+  deduplicateSlug?: boolean | undefined;
+}
+
+function ensureUniqueSlug(userId: number, baseSlug: string): string {
+  const db = getDb();
+  const clean = baseSlug || 'untitled';
+  let candidate = clean;
+  let counter = 2;
+  while (db.prepare('SELECT 1 FROM wiki_pages WHERE user_id = ? AND slug = ?').get(userId, candidate)) {
+    candidate = `${clean}-${counter}`;
+    counter += 1;
+  }
+  return candidate;
 }
 
 export function createWikiPage(params: CreateWikiPageParams): WikiPageRecord {
@@ -336,7 +366,8 @@ export function createWikiPage(params: CreateWikiPageParams): WikiPageRecord {
   if (!cleanTitle) {
     throw new Error('Wiki page title cannot be empty');
   }
-  const slug = generateSlug(cleanTitle);
+  const baseSlug = generateSlug(cleanTitle);
+  const slug = params.deduplicateSlug ? ensureUniqueSlug(params.userId, baseSlug) : baseSlug;
 
   let parentPath = '/';
   if (params.parentId) {
@@ -804,4 +835,57 @@ export function findUnlinkedMentions(
   }
 
   return results;
+}
+
+export interface PromoteNoteParams {
+  userId: number;
+  userEmail: string;
+  resourceId: number | string;
+  title?: string | undefined;
+  parentId?: number | null | undefined;
+  archiveOriginal?: boolean | undefined;
+}
+
+/** Promote a knowledge-base note resource into a structured Wiki page, inheriting tags & assets. */
+export async function promoteNoteToWiki(
+  params: PromoteNoteParams
+): Promise<{ page: WikiPageRecord; archivedOriginal: boolean }> {
+  const current = getResource(params.userId, params.resourceId);
+  if (!current) {
+    throw new NotFoundError('Resource not found');
+  }
+  if (current.type !== 'note') {
+    throw new ValidationError('Only note resources can be promoted to Wiki');
+  }
+
+  let content = current.content_text ?? '';
+  if (current.file_path && fs.existsSync(current.file_path)) {
+    content = fs.readFileSync(current.file_path, 'utf8');
+  }
+
+  const targetTitle = normalizeTitle(params.title || current.title) || '未命名笔记';
+  const archiveOriginal = params.archiveOriginal !== false;
+
+  const page = createWikiPage({
+    userId: params.userId,
+    userEmail: params.userEmail,
+    title: targetTitle,
+    content,
+    parentId: params.parentId ?? null,
+    tags: current.tags,
+    deduplicateSlug: true,
+  });
+
+  if (archiveOriginal) {
+    const db = getDb();
+    db.prepare(`
+      UPDATE assets
+      SET owner_type = 'wiki', owner_id = ?
+      WHERE user_id = ? AND owner_type = 'resource' AND owner_id = ?
+    `).run(String(page.id), params.userId, String(current.id));
+
+    await deleteUserResource(params.userId, current.id);
+  }
+
+  return { page, archivedOriginal: archiveOriginal };
 }

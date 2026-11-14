@@ -13,9 +13,12 @@
     <wiki-tree
       v-show="!treeCollapsed"
       :tree="wikiStore.tree"
-      :current-id="wikiStore.currentPage?.id"
+      :current-id="selectedInboxNote ? null : wikiStore.currentPage?.id"
       :loading="wikiStore.loadingTree"
+      :inbox-notes="inboxNotes"
+      :selected-inbox-id="selectedInboxNote?.id ?? null"
       @select="handleSelectPage"
+      @select-inbox="handleSelectInboxNote"
       @create-page="handleCreatePage"
       @rename-page="handleRenamePage"
       @move-page="handleMovePage"
@@ -24,8 +27,73 @@
       @open-graph="showGraphModal = true"
     />
 
+    <!-- Center Inbox Preview & Promote Workbench -->
+    <section v-if="selectedInboxNote" class="inbox-workbench">
+      <header class="inbox-wb-header">
+        <div class="inbox-wb-badge-row">
+          <span class="inbox-wb-badge">
+            <Icon name="note" :size="13" />
+            <span>笔记收件箱</span>
+          </span>
+          <span v-if="loadingInboxDetail" class="muted" style="font-size: 12px">读取完整正文中…</span>
+        </div>
+        <button
+          v-if="wikiStore.currentPage"
+          type="button"
+          class="dlg-cancel"
+          @click="selectedInboxNote = null"
+        >
+          返回 Wiki 编辑
+        </button>
+      </header>
+
+      <div class="inbox-wb-form">
+        <div class="inbox-wb-field">
+          <label for="inbox-promote-title">转正 Wiki 页面标题</label>
+          <input
+            id="inbox-promote-title"
+            v-model="inboxPromoteTitle"
+            type="text"
+            placeholder="请输入 Wiki 页面标题"
+            :disabled="promotingInbox"
+          />
+        </div>
+        <div class="inbox-wb-row">
+          <div class="inbox-wb-field" style="flex: 1">
+            <label for="inbox-promote-parent">存放位置（父目录）</label>
+            <select id="inbox-promote-parent" v-model="inboxPromoteParentId" :disabled="promotingInbox">
+              <option :value="null">根目录</option>
+              <option v-for="opt in wikiParentOptions" :key="opt.id" :value="opt.id">
+                {{ opt.prefix }}{{ opt.title }}
+              </option>
+            </select>
+          </div>
+          <label class="inbox-wb-check">
+            <input v-model="inboxArchiveOriginal" type="checkbox" :disabled="promotingInbox" />
+            <span>转正后移出收件箱</span>
+          </label>
+          <button
+            type="button"
+            class="dlg-confirm inbox-wb-submit"
+            :disabled="!inboxPromoteTitle.trim() || promotingInbox"
+            @click="confirmPromoteInboxNote"
+          >
+            {{ promotingInbox ? '正在转正…' : '一键转正为 Wiki 页面' }}
+          </button>
+        </div>
+      </div>
+
+      <div class="inbox-wb-body">
+        <div v-if="selectedInboxNote.tags && selectedInboxNote.tags.length > 0" class="inbox-wb-tags">
+          <span v-for="t in selectedInboxNote.tags" :key="t" class="inbox-wb-tag">#{{ t }}</span>
+        </div>
+        <div class="inbox-wb-content" v-html="renderMd(inboxNoteContent || '（此笔记暂无正文内容）')" />
+      </div>
+    </section>
+
     <!-- Center Markdown Editor -->
     <wiki-editor
+      v-else
       ref="editorRef"
       :page="wikiStore.currentPage"
       :all-pages="allPagesFlattened"
@@ -51,7 +119,7 @@
 
     <!-- Right Context Sidebar -->
     <wiki-sidebar
-      v-if="wikiStore.currentPage && !sidebarCollapsed"
+      v-if="wikiStore.currentPage && !selectedInboxNote && !sidebarCollapsed"
       :page-id="wikiStore.currentPage.id"
       :content="wikiStore.currentPage.content"
       :revision-count="wikiStore.currentPage.revision_count"
@@ -98,7 +166,17 @@
 <script setup lang="ts">
 import { computed, nextTick, onActivated, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
+import {
+  getResourceDetail,
+  listResources,
+  promoteNoteToWiki,
+  type ResourceItem,
+} from '../api/client';
+import { useAuthStore } from '../stores/auth';
 import { useWikiStore, type WikiTreeNode } from '../stores/wiki';
+import { renderMd } from '../utils/chat-format';
+import { flattenWikiTreeOptions } from '../utils/wiki-tree';
+import Icon from '../components/Icon.vue';
 import WikiTree from '../components/wiki/WikiTree.vue';
 import WikiEditor from '../components/wiki/WikiEditor.vue';
 import WikiSidebar from '../components/wiki/WikiSidebar.vue';
@@ -109,6 +187,7 @@ defineOptions({ name: 'WikiView' });
 
 const route = useRoute();
 const router = useRouter();
+const auth = useAuthStore();
 const wikiStore = useWikiStore();
 
 const editorRef = ref<InstanceType<typeof WikiEditor> | null>(null);
@@ -117,6 +196,21 @@ const showCommandModal = ref(false);
 const treeCollapsed = ref(false);
 const sidebarCollapsed = ref(false);
 const pendingCreateTarget = ref<string | null>(null);
+
+interface InboxDetailItem {
+  id: number;
+  title: string;
+  tags?: string[];
+  content?: string;
+}
+
+const inboxNotes = ref<ResourceItem[]>([]);
+const selectedInboxNote = ref<InboxDetailItem | null>(null);
+const loadingInboxDetail = ref(false);
+const inboxPromoteTitle = ref('');
+const inboxPromoteParentId = ref<number | null>(null);
+const inboxArchiveOriginal = ref(true);
+const promotingInbox = ref(false);
 
 const toast = ref<{ message: string; type: 'info' | 'success' | 'error' }>({
   message: '',
@@ -165,6 +259,19 @@ const allPagesFlattened = computed<FlattenedPage[]>(() => {
   return list;
 });
 
+const wikiParentOptions = computed(() => flattenWikiTreeOptions(wikiStore.tree));
+
+const inboxNoteContent = computed(() => selectedInboxNote.value?.content ?? '');
+
+async function loadInboxNotes() {
+  try {
+    const res = await listResources(auth.token, { type: 'note', limit: 100 });
+    inboxNotes.value = Array.isArray(res?.resources) ? res.resources : [];
+  } catch {
+    inboxNotes.value = [];
+  }
+}
+
 const pageById = computed(() => {
   const m = new Map<number, FlattenedPage>();
   for (const p of allPagesFlattened.value) m.set(p.id, p);
@@ -203,7 +310,7 @@ function handleBeforeUnload(e: BeforeUnloadEvent) {
 
 async function syncWikiViewOnEnter() {
   try {
-    const tree = await wikiStore.loadTree();
+    const [tree] = await Promise.all([wikiStore.loadTree(), loadInboxNotes()]);
     const rawId = route.params.id;
     const paramId = rawId ? Number(Array.isArray(rawId) ? rawId[0] : rawId) : NaN;
     if (Number.isFinite(paramId) && paramId > 0) {
@@ -255,6 +362,7 @@ watch(
 );
 
 async function handleSelectPage(pageId: number) {
+  selectedInboxNote.value = null;
   try {
     await wikiStore.openPage(pageId);
     if (Number(route.params.id) !== pageId) {
@@ -262,6 +370,49 @@ async function handleSelectPage(pageId: number) {
     }
   } catch (err: unknown) {
     showToast(`打开页面失败：${err instanceof Error ? err.message : String(err)}`, 'error');
+  }
+}
+
+async function handleSelectInboxNote(noteId: number) {
+  const summary = inboxNotes.value.find((n) => n.id === noteId);
+  selectedInboxNote.value = summary
+    ? { id: summary.id, title: summary.title, tags: summary.tags }
+    : { id: noteId, title: '未命名笔记' };
+  inboxPromoteTitle.value = summary?.title || '未命名笔记';
+  inboxPromoteParentId.value = null;
+  inboxArchiveOriginal.value = true;
+  loadingInboxDetail.value = true;
+  try {
+    const detail = await getResourceDetail(auth.token, noteId);
+    if (selectedInboxNote.value?.id === noteId) {
+      selectedInboxNote.value = detail;
+      inboxPromoteTitle.value = detail.title || '未命名笔记';
+    }
+  } catch (err: unknown) {
+    showToast(`读取笔记失败：${err instanceof Error ? err.message : String(err)}`, 'error');
+  } finally {
+    loadingInboxDetail.value = false;
+  }
+}
+
+async function confirmPromoteInboxNote() {
+  const note = selectedInboxNote.value;
+  if (!note || promotingInbox.value || !inboxPromoteTitle.value.trim()) return;
+  promotingInbox.value = true;
+  try {
+    const res = await promoteNoteToWiki(auth.token, note.id, {
+      title: inboxPromoteTitle.value.trim(),
+      parent_id: inboxPromoteParentId.value,
+      archive_original: inboxArchiveOriginal.value,
+    });
+    selectedInboxNote.value = null;
+    await Promise.all([wikiStore.loadTree(), loadInboxNotes()]);
+    await handleSelectPage(res.page.id);
+    showToast(`已将“${res.page.title}”转正为 Wiki 页面`, 'success');
+  } catch (err: unknown) {
+    showToast(`转正失败：${err instanceof Error ? err.message : String(err)}`, 'error');
+  } finally {
+    promotingInbox.value = false;
   }
 }
 
@@ -524,5 +675,127 @@ function handleInsertIntoEditor(text: string) {
   font-size: 12.5px;
   font-weight: 600;
   cursor: pointer;
+}
+
+.inbox-workbench {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface, #ffffff);
+  overflow-y: auto;
+  padding: 20px 28px 40px;
+  gap: 16px;
+}
+
+.inbox-wb-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.inbox-wb-badge-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.inbox-wb-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #0058b0;
+  background: rgba(0, 113, 227, 0.08);
+  border: 1px solid rgba(0, 113, 227, 0.2);
+}
+
+.inbox-wb-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px 18px;
+  border-radius: 12px;
+  border: 1px solid var(--border, #e5e5ea);
+  background: var(--bg, #fbfbfd);
+}
+
+.inbox-wb-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.inbox-wb-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.inbox-wb-field label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-secondary, #6e6e73);
+}
+
+.inbox-wb-field input,
+.inbox-wb-field select {
+  border: 1px solid var(--border, #d1d1d6);
+  border-radius: 8px;
+  padding: 7px 10px;
+  font-size: 13.5px;
+  background: var(--surface, #ffffff);
+  color: var(--text, #1d1d1f);
+}
+
+.inbox-wb-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  color: var(--text-secondary, #6e6e73);
+  padding-bottom: 7px;
+  cursor: pointer;
+}
+
+.inbox-wb-submit {
+  padding: 8px 16px;
+  font-size: 13px;
+}
+
+.inbox-wb-body {
+  padding: 18px 20px;
+  border-radius: 12px;
+  border: 1px solid var(--border, #e5e5ea);
+  background: var(--surface, #ffffff);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.inbox-wb-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.inbox-wb-tag {
+  font-size: 12px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--bg-secondary, rgba(120, 120, 128, 0.1));
+  color: var(--text-secondary, #6e6e73);
+}
+
+.inbox-wb-content {
+  font-size: 14px;
+  line-height: 1.7;
+  color: var(--text, #1d1d1f);
+  word-break: break-word;
 }
 </style>

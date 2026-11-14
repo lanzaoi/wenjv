@@ -554,4 +554,77 @@ describe('Wiki Service & Routes (S7)', () => {
     };
     expect(graph.links.some((l) => l.source === srcPage.id && l.target === targetPage.id)).toBe(true);
   });
+
+  it('promotes a note resource to Wiki preserving tags, deduplicating slug, and optionally archiving original', async () => {
+    // Seed an existing wiki page with same title to verify slug deduplication
+    const existingResp = await env.app.request('/wiki/pages', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: 'Physics Inbox', content: 'old wiki page' }),
+    });
+    expect(existingResp.status).toBe(201);
+    const parentPage = (await existingResp.json()) as { id: number };
+
+    // Create two note resources
+    const note1Resp = await env.app.request('/resources/notes', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        title: 'Physics Inbox',
+        content: '牛顿第二定律 $F=ma$ 笔记内容。',
+        tags: ['physics', 'inbox'],
+      }),
+    });
+    expect(note1Resp.status).toBe(201);
+    const note1 = (await note1Resp.json()) as { id: number };
+
+    // 1. Promote with archive_original=true (default) & colliding slug & parent_id
+    const promoteResp = await env.app.request(`/resources/${note1.id}/promote-to-wiki`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ parent_id: parentPage.id }),
+    });
+    expect(promoteResp.status).toBe(201);
+    const promoted = (await promoteResp.json()) as {
+      page: { id: number; slug: string; parent_id: number | null; content: string; tags: string[] };
+      archived_original: boolean;
+    };
+    expect(promoted.archived_original).toBe(true);
+    expect(promoted.page.parent_id).toBe(parentPage.id);
+    expect(promoted.page.slug).toBe('physics-inbox-2');
+    expect(promoted.page.content).toContain('牛顿第二定律');
+    expect(promoted.page.tags).toEqual(expect.arrayContaining(['physics', 'inbox']));
+
+    // Original note should be removed when archived_original=true
+    const checkRemoved = await env.app.request(`/resources/${note1.id}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    expect(checkRemoved.status).toBe(404);
+
+    // 2. Promote with archive_original=false keeps note resource
+    const note2Resp = await env.app.request('/resources/notes', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        title: 'Keep Copy Note',
+        content: '保留原笔记副本的内容。',
+        tags: ['keep'],
+      }),
+    });
+    const note2 = (await note2Resp.json()) as { id: number };
+    const keepResp = await env.app.request(`/resources/${note2.id}/promote-to-wiki`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: 'Copy Wiki Title', archive_original: false }),
+    });
+    expect(keepResp.status).toBe(201);
+    const keepData = (await keepResp.json()) as { archived_original: boolean; page: { title: string } };
+    expect(keepData.archived_original).toBe(false);
+    expect(keepData.page.title).toBe('Copy Wiki Title');
+
+    const checkKept = await env.app.request(`/resources/${note2.id}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    expect(checkKept.status).toBe(200);
+  });
 });

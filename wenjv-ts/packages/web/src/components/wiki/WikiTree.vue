@@ -158,6 +158,33 @@
           @cancel-delete="confirmingDeleteId = null"
         />
       </div>
+
+      <!-- Inbox Notes Section (Scheme A+B) -->
+      <div v-if="inboxNotes && inboxNotes.length > 0" class="inbox-section">
+        <button type="button" class="inbox-header" @click="inboxCollapsed = !inboxCollapsed">
+          <span class="inbox-header-left">
+            <span class="inbox-chevron" :class="{ collapsed: inboxCollapsed }">▾</span>
+            <span>笔记收件箱</span>
+          </span>
+          <span class="inbox-count">{{ filteredInboxNotes.length }}</span>
+        </button>
+        <div v-if="!inboxCollapsed" class="inbox-list">
+          <div v-if="filteredInboxNotes.length === 0" class="inbox-empty">无匹配收件箱笔记</div>
+          <button
+            v-for="note in filteredInboxNotes"
+            :key="note.id"
+            type="button"
+            class="inbox-item"
+            :class="{ active: selectedInboxId === note.id }"
+            :title="note.title"
+            @click="$emit('select-inbox', note.id)"
+          >
+            <Icon name="note" :size="13" class="inbox-item-icon" />
+            <span class="inbox-item-title">{{ note.title || '未命名笔记' }}</span>
+            <span class="inbox-promote-hint">整理</span>
+          </button>
+        </div>
+      </div>
     </div>
   </aside>
 </template>
@@ -165,16 +192,26 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue';
 import type { WikiTreeNode } from '../../stores/wiki';
+import Icon from '../Icon.vue';
 import WikiTreeItem from './WikiTreeItem.vue';
+
+export interface InboxNoteSummary {
+  id: number;
+  title: string;
+  tags?: string[];
+}
 
 const props = defineProps<{
   tree: WikiTreeNode[];
   currentId?: number | null | undefined;
   loading?: boolean;
+  inboxNotes?: InboxNoteSummary[];
+  selectedInboxId?: number | null | undefined;
 }>();
 
 const emit = defineEmits<{
   (e: 'select', pageId: number): void;
+  (e: 'select-inbox', noteId: number): void;
   (e: 'create-page', payload: { title: string; parentId: number | null }): void;
   (e: 'rename-page', payload: { id: number; title: string }): void;
   (e: 'move-page', payload: { id: number; targetParentId: number | null; sortOrder: number }): void;
@@ -183,6 +220,7 @@ const emit = defineEmits<{
   (e: 'open-graph'): void;
 }>();
 
+const inboxCollapsed = ref(false);
 const filterQuery = ref('');
 const expandedIds = ref<Set<number>>(new Set());
 const confirmingDeleteId = ref<number | null>(null);
@@ -274,6 +312,17 @@ const filteredResult = computed(() => {
 
 const displayedTree = computed(() => filteredResult.value.nodes);
 const effectiveExpandedIds = computed(() => filteredResult.value.matchedIds ?? expandedIds.value);
+
+const filteredInboxNotes = computed(() => {
+  const notes = props.inboxNotes || [];
+  const q = filterQuery.value.trim().toLowerCase();
+  if (!q) return notes;
+  return notes.filter((n) => {
+    const titleHit = (n.title || '').toLowerCase().includes(q);
+    const tagHit = (n.tags || []).some((t) => t.toLowerCase().includes(q));
+    return titleHit || tagHit;
+  });
+});
 
 function toggleExpand(pageId: number) {
   const next = new Set(expandedIds.value);
@@ -699,5 +748,125 @@ function confirmMoveParent() {
 
 .empty-cta:hover {
   background: rgba(0, 113, 227, 0.14);
+}
+
+.inbox-section {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border, #e5e5ea);
+}
+
+.inbox-header {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 6px;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary, #6e6e73);
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+  border-radius: 6px;
+}
+
+.inbox-header:hover {
+  background: rgba(120, 120, 128, 0.08);
+  color: var(--text, #1d1d1f);
+}
+
+.inbox-header-left {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.inbox-chevron {
+  display: inline-block;
+  font-size: 10px;
+  transition: transform 0.15s ease;
+}
+
+.inbox-chevron.collapsed {
+  transform: rotate(-90deg);
+}
+
+.inbox-count {
+  font-size: 11px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: rgba(120, 120, 128, 0.12);
+  color: var(--text-secondary, #6e6e73);
+}
+
+.inbox-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 4px;
+}
+
+.inbox-empty {
+  padding: 8px;
+  font-size: 11.5px;
+  color: var(--text-tertiary, #86868b);
+  text-align: center;
+}
+
+.inbox-item {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  border: none;
+  background: transparent;
+  border-radius: 7px;
+  font-size: 12.5px;
+  color: var(--text, #1d1d1f);
+  cursor: pointer;
+  text-align: left;
+  transition: background-color 0.12s ease;
+}
+
+.inbox-item:hover {
+  background: rgba(120, 120, 128, 0.09);
+}
+
+.inbox-item.active {
+  background: rgba(0, 113, 227, 0.1);
+  color: #0058b0;
+  font-weight: 500;
+}
+
+.inbox-item-icon {
+  color: var(--text-secondary, #6e6e73);
+  flex-shrink: 0;
+}
+
+.inbox-item-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.inbox-promote-hint {
+  font-size: 10.5px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid rgba(0, 113, 227, 0.25);
+  color: #0058b0;
+  background: rgba(0, 113, 227, 0.06);
+  opacity: 0;
+  transition: opacity 0.12s ease;
+  flex-shrink: 0;
+}
+
+.inbox-item:hover .inbox-promote-hint,
+.inbox-item.active .inbox-promote-hint {
+  opacity: 1;
 }
 </style>

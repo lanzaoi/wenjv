@@ -21,6 +21,7 @@ import {
   type ResourceType,
 } from '../services/resources.js';
 import { enqueueJob, markEntityPending } from '../services/jobs.js';
+import { NotFoundError, ValidationError, promoteNoteToWiki } from '../services/wiki.js';
 
 export const resourcesRouter = new Hono();
 
@@ -411,4 +412,50 @@ resourcesRouter.post('/:id/reingest', authMiddleware, async (c) => {
   });
 
   return c.json({ status: 'pending', resource_id: resource.id, job_id: jobId }, 202);
+});
+
+// POST /resources/:id/promote-to-wiki
+resourcesRouter.post('/:id/promote-to-wiki', authMiddleware, async (c) => {
+  const user = c.get('user') as AuthUser;
+  const idOrName = c.req.param('id') || '';
+
+  let body: Record<string, unknown> = {};
+  try {
+    body = (await c.req.json()) as Record<string, unknown>;
+  } catch {
+    body = {};
+  }
+
+  const rawParentId = body['parent_id'];
+  const parentId =
+    rawParentId !== undefined && rawParentId !== null && rawParentId !== ''
+      ? Number(rawParentId)
+      : null;
+
+  try {
+    const result = await promoteNoteToWiki({
+      userId: user.id,
+      userEmail: user.email,
+      resourceId: idOrName,
+      title: typeof body['title'] === 'string' ? body['title'] : undefined,
+      parentId: Number.isFinite(parentId) && (parentId as number) > 0 ? parentId : null,
+      archiveOriginal: body['archive_original'] !== false,
+    });
+    return c.json(
+      {
+        page: result.page,
+        archived_original: result.archivedOriginal,
+      },
+      201
+    );
+  } catch (err: unknown) {
+    if (err instanceof NotFoundError) {
+      return c.json({ detail: err.message }, 404);
+    }
+    if (err instanceof ValidationError) {
+      return c.json({ detail: err.message }, 400);
+    }
+    const msg = err instanceof Error ? err.message : String(err);
+    return c.json({ detail: msg }, 400);
+  }
 });

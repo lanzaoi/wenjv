@@ -153,16 +153,24 @@
   </svg>
 </template>
 
-<script setup>
+<script setup lang="ts">
 import { computed } from 'vue'
 
-const props = defineProps({
-  name: { type: String, required: true },
-  size: { type: [Number, String], default: 18 },
-  strokeWidth: { type: [Number, String], default: 1.75 },
-  color: { type: String, default: 'currentColor' },
-  spin: { type: Boolean, default: false },
-})
+const props = withDefaults(
+  defineProps<{
+    name: string
+    size?: number | string
+    strokeWidth?: number | string
+    color?: string
+    spin?: boolean
+  }>(),
+  {
+    size: 18,
+    strokeWidth: 1.75,
+    color: 'currentColor',
+    spin: false,
+  },
+)
 
 const filled = new Set(['logo'])
 const kind = computed(() => (filled.has(props.name) ? 'fill' : 'stroke'))

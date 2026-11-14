@@ -13,7 +13,9 @@
     "test": "pnpm -r run test",
     "no-stubs": "bash scripts/no-stubs.sh",
     "reingest": "pnpm --filter @wenjv/server run reingest --",
-    "verify": "pnpm run no-stubs && pnpm run typecheck && pnpm run test"
+    "test:e2e": "playwright test",
+    "verify": "pnpm run no-stubs && pnpm run typecheck && pnpm run test",
+    "verify:all": "bash scripts/verify-all.sh"
   },
   "pnpm": {
     "onlyBuiltDependencies": [
@@ -26,6 +28,7 @@
     ]
   },
   "devDependencies": {
+    "@playwright/test": "^1.65.1",
     "@types/node": "^22.20.5",
     "tsx": "^4.23.15",
     "typescript": "~5.8.3"

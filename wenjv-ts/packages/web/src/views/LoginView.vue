@@ -48,7 +48,7 @@
   </div>
 </template>
 
-<script setup>
+<script setup lang="ts">
 import { ref } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
@@ -73,7 +73,7 @@ async function onSubmit() {
       : '/'
     router.replace(safeRedirect)
   } catch (e) {
-    error.value = e.message || '登录失败'
+    error.value = e instanceof Error ? e.message : '登录失败'
   } finally {
     loading.value = false
   }

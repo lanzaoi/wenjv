@@ -49,7 +49,7 @@
   </div>
 </template>
 
-<script setup>
+<script setup lang="ts">
 import { ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
@@ -74,7 +74,7 @@ async function onSubmit() {
     await auth.register(email.value.trim(), password.value)
     router.replace('/')
   } catch (e) {
-    error.value = e.message || '注册失败'
+    error.value = e instanceof Error ? e.message : '注册失败'
   } finally {
     loading.value = false
   }

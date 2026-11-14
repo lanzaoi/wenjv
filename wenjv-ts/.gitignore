@@ -7,6 +7,8 @@ dist/
 # 本地运行数据（开发用临时数据目录）
 .data/
 coverage/
+playwright-report/
+test-results/
 sidecar/.venv/
 sidecar/__pycache__/
 *.pyc

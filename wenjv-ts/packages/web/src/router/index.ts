@@ -22,6 +22,12 @@ const routes: RouteRecordRaw[] = [
       { path: '', name: 'chat', component: () => import('../views/ChatView.vue') },
       { path: 'library', name: 'library', component: () => import('../views/LibraryView.vue') },
       { path: 'wiki/:id?', name: 'wiki', component: () => import('../views/WikiView.vue') },
+      {
+        path: 'admin',
+        name: 'admin',
+        component: () => import('../views/AdminView.vue'),
+        meta: { requiresAdmin: true },
+      },
     ],
   },
 ];
@@ -38,6 +44,9 @@ router.beforeEach(async (to) => {
     if (!auth.token) return { name: 'login', query: { redirect: to.fullPath } };
     const ok = await auth.ensureValid();
     if (!ok) return { name: 'login' };
+  }
+  if (to.meta['requiresAdmin'] && !auth.isSuperuser) {
+    return { name: 'chat' };
   }
   if (to.meta['guest'] && auth.token) {
     return { name: 'chat' };

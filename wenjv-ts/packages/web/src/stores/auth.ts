@@ -1,5 +1,11 @@
 import { defineStore } from 'pinia';
-import { login as apiLogin, register as apiRegister, validateToken, type ApiError } from '../api/client.js';
+import {
+  login as apiLogin,
+  register as apiRegister,
+  validateToken,
+  getMe,
+  type ApiError,
+} from '../api/client.js';
 import { useChatStore } from './chat.js';
 import { useLibraryStore } from './library.js';
 import { useWikiStore } from './wiki.js';
@@ -11,6 +17,7 @@ const VALIDATION_CACHE_TTL_MS = 5 * 60 * 1000;
 export interface AuthState {
   token: string | null;
   email: string | null;
+  isSuperuser: boolean;
   ready: boolean;
   lastValidatedAt: number;
 }
@@ -19,6 +26,7 @@ export const useAuthStore = defineStore('auth', {
   state: (): AuthState => ({
     token: null,
     email: null,
+    isSuperuser: false,
     ready: false,
     lastValidatedAt: 0,
   }),
@@ -42,9 +50,11 @@ export const useAuthStore = defineStore('auth', {
         const data = JSON.parse(raw);
         this.token = data.token || null;
         this.email = data.email || null;
+        this.isSuperuser = Boolean(data.isSuperuser);
       } catch {
         this.token = null;
         this.email = null;
+        this.isSuperuser = false;
       }
       this.ready = true;
     },
@@ -52,7 +62,7 @@ export const useAuthStore = defineStore('auth', {
       if (this.token) {
         localStorage.setItem(
           STORAGE_KEY,
-          JSON.stringify({ token: this.token, email: this.email })
+          JSON.stringify({ token: this.token, email: this.email, isSuperuser: this.isSuperuser })
         );
       } else {
         localStorage.removeItem(STORAGE_KEY);
@@ -71,6 +81,10 @@ export const useAuthStore = defineStore('auth', {
         const r = await validateToken(this.token);
         if (r && r.valid) {
           this.lastValidatedAt = now;
+          if (typeof r.is_superuser === 'boolean') {
+            this.isSuperuser = r.is_superuser;
+            this.persist();
+          }
           return true;
         }
         if (r && r.valid === false) {
@@ -94,6 +108,12 @@ export const useAuthStore = defineStore('auth', {
       this.token = data.access_token;
       this.email = email;
       this.lastValidatedAt = Date.now();
+      try {
+        const me = await getMe(data.access_token);
+        this.isSuperuser = Boolean(me?.is_superuser);
+      } catch {
+        this.isSuperuser = false;
+      }
       this.persist();
     },
     async register(email: string, password: string): Promise<void> {
@@ -109,6 +129,7 @@ export const useAuthStore = defineStore('auth', {
     logout() {
       this.token = null;
       this.email = null;
+      this.isSuperuser = false;
       this.lastValidatedAt = 0;
       this.persist();
       try {

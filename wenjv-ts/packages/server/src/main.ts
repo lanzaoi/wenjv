@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { Hono } from 'hono';
+import { Hono, type Context } from 'hono';
 import { serve } from '@hono/node-server';
 import { cors } from 'hono/cors';
 import { config } from './config.js';
@@ -16,6 +16,49 @@ import { jobsRouter } from './routes/jobs.js';
 import { chatRouter } from './routes/chat.js';
 import { wikiRouter } from './routes/wiki.js';
 import { adminRouter } from './routes/admin.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+const STATIC_MIME: Record<string, string> = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'application/javascript; charset=utf-8',
+  '.mjs': 'application/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.webp': 'image/webp',
+  '.gif': 'image/gif',
+  '.ico': 'image/x-icon',
+  '.woff': 'font/woff',
+  '.woff2': 'font/woff2',
+  '.json': 'application/json; charset=utf-8',
+  '.txt': 'text/plain; charset=utf-8',
+};
+
+function resolveWebDistDir(): string | null {
+  if (process.env['SERVE_STATIC'] === 'false') return null;
+  const candidates = [
+    process.env['WENJV_WEB_DIST'],
+    path.resolve(__dirname, '../../web/dist'),
+    path.resolve(__dirname, '../../../web/dist'),
+  ].filter((p): p is string => Boolean(p));
+
+  for (const dir of candidates) {
+    if (fs.existsSync(path.join(dir, 'index.html'))) {
+      return dir;
+    }
+  }
+  return null;
+}
+
+function wantsHtmlBrowserNav(c: Context): boolean {
+  if (c.req.method !== 'GET' && c.req.method !== 'HEAD') return false;
+  const accept = c.req.header('accept') || '';
+  return accept.includes('text/html');
+}
 
 export function createApp(): Hono {
   const app = new Hono();
@@ -46,6 +89,60 @@ export function createApp(): Hono {
   );
 
   // Root & Health
+  const webDistDir = resolveWebDistDir();
+  const sendSpaIndex = (c: Context): Response => {
+    const html = fs.readFileSync(path.join(webDistDir!, 'index.html'));
+    return new Response(html, {
+      status: 200,
+      headers: {
+        'Content-Type': 'text/html; charset=utf-8',
+        'Cache-Control': 'no-cache',
+      },
+    });
+  };
+
+  if (webDistDir) {
+    app.use('*', async (c, next) => {
+      if (c.req.method !== 'GET' && c.req.method !== 'HEAD') {
+        await next();
+        return;
+      }
+      const reqPath = new URL(c.req.url).pathname;
+      if (reqPath.startsWith('/api/') || reqPath.startsWith('/assets/image')) {
+        await next();
+        return;
+      }
+      const rel = reqPath.replace(/^\/+/, '');
+      if (rel) {
+        const candidate = path.resolve(webDistDir, rel);
+        const safePrefix = webDistDir + path.sep;
+        if (candidate.startsWith(safePrefix) && fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
+          const ext = path.extname(candidate).toLowerCase();
+          const mime = STATIC_MIME[ext] || 'application/octet-stream';
+          const cacheControl = reqPath.startsWith('/assets/')
+            ? 'public, max-age=31536000, immutable'
+            : 'public, max-age=3600';
+          return new Response(fs.readFileSync(candidate), {
+            status: 200,
+            headers: {
+              'Content-Type': mime,
+              'Cache-Control': cacheControl,
+            },
+          });
+        }
+      }
+      if (
+        (reqPath === '/' || reqPath === '/admin') &&
+        wantsHtmlBrowserNav(c) &&
+        !c.req.header('authorization') &&
+        !c.req.query('token')
+      ) {
+        return sendSpaIndex(c);
+      }
+      await next();
+    });
+  }
+
   app.get('/', (c) => c.json({ message: 'wenjv API 运行中' }));
   app.get('/ping', (c) => c.json({ message: 'pong' }));
   app.get('/health', async (c) => {
@@ -101,12 +198,25 @@ export function createApp(): Hono {
   app.route('/admin', adminRouter);
 
   // Prefix-safe /api aliases for direct API clients without proxy path rewrite
+  app.route('/api/auth', authRouter);
   app.route('/api/resources', resourcesRouter);
   app.route('/api/search', searchRouter);
   app.route('/api/tags', tagsRouter);
   app.route('/api/assets', assetsRouter);
+  app.route('/api/jobs', jobsRouter);
   app.route('/api/chat', chatRouter);
   app.route('/api/wiki', wikiRouter);
+  app.route('/api/admin', adminRouter);
+
+  if (webDistDir) {
+    app.notFound((c) => {
+      const reqPath = new URL(c.req.url).pathname;
+      if (wantsHtmlBrowserNav(c) && !reqPath.startsWith('/api/')) {
+        return sendSpaIndex(c);
+      }
+      return c.json({ detail: 'Not Found' }, 404);
+    });
+  }
 
   return app;
 }

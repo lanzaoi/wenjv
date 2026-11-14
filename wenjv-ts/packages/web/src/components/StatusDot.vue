@@ -5,13 +5,19 @@
   </span>
 </template>
 
-<script setup>
+<script setup lang="ts">
 import { computed } from 'vue'
 
-const props = defineProps({
-  status: { type: [String, null], default: '' },
-  showLabel: { type: Boolean, default: true },
-})
+const props = withDefaults(
+  defineProps<{
+    status?: string | null
+    showLabel?: boolean
+  }>(),
+  {
+    status: '',
+    showLabel: true,
+  },
+)
 
 const tone = computed(() => {
   const x = String(props.status || '').toLowerCase()
@@ -25,7 +31,13 @@ const tone = computed(() => {
     x.includes('ready')
   )
     return 'ok'
-  if (x.includes('queue') || x.includes('pend') || x.includes('process') || x.includes('run'))
+  if (
+    x.includes('queue') ||
+    x.includes('pend') ||
+    x.includes('process') ||
+    x.includes('progress') ||
+    x.includes('run')
+  )
     return 'pending'
   return 'neutral'
 })

@@ -40,6 +40,26 @@ export async function authMiddleware(c: Context, next: Next): Promise<Response |
   }
 }
 
+export async function resolveBearerOrQueryUser(c: Context): Promise<AuthUser | null> {
+  const authHeader = c.req.header('Authorization');
+  let token = c.req.query('token');
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    token = authHeader.slice(7).trim();
+  }
+  if (!token) return null;
+  try {
+    const { userId } = await verifyAccessToken(token);
+    const db = getDb();
+    const user = db
+      .prepare('SELECT id, email, username, is_active, is_superuser, is_verified FROM users WHERE id = ?')
+      .get(userId) as AuthUser | undefined;
+    if (!user || !user.is_active) return null;
+    return user;
+  } catch {
+    return null;
+  }
+}
+
 export async function optionalAuthMiddleware(c: Context, next: Next): Promise<Response | void> {
   const authHeader = c.req.header('Authorization');
   if (authHeader && authHeader.startsWith('Bearer ')) {

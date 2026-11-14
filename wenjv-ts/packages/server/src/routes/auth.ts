@@ -151,9 +151,16 @@ authRouter.post('/validate-token', async (c) => {
     const token = String(json.token || '');
     const { userId } = await verifyAccessToken(token);
     const db = getDb();
-    const user = db.prepare('SELECT id, email, is_active FROM users WHERE id = ?').get(userId) as { id: number; email: string; is_active: number } | undefined;
+    const user = db
+      .prepare('SELECT id, email, is_active, is_superuser FROM users WHERE id = ?')
+      .get(userId) as { id: number; email: string; is_active: number; is_superuser: number } | undefined;
     if (user && user.is_active) {
-      return c.json({ valid: true, user_id: user.id, email: user.email });
+      return c.json({
+        valid: true,
+        user_id: user.id,
+        email: user.email,
+        is_superuser: Boolean(user.is_superuser),
+      });
     }
   } catch {
     // ignore

@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { Hono } from 'hono';
-import { authMiddleware, type AuthUser } from '../auth/middleware.js';
+import { authMiddleware, resolveBearerOrQueryUser, type AuthUser } from '../auth/middleware.js';
 import { config } from '../config.js';
 import {
   enqueueImportedEntities,
@@ -344,9 +344,12 @@ resourcesRouter.put('/:id/tags', authMiddleware, async (c) => {
   return c.json({ tags: updated.tags });
 });
 
-// GET /resources/:id/content
-resourcesRouter.get('/:id/content', authMiddleware, (c) => {
-  const user = c.get('user') as AuthUser;
+// GET /resources/:id/content (supports Bearer header or ?token= for <img> preview)
+resourcesRouter.get('/:id/content', async (c) => {
+  const user = await resolveBearerOrQueryUser(c);
+  if (!user) {
+    return c.json({ detail: 'Unauthorized' }, 401);
+  }
   const idOrName = c.req.param('id') || '';
   const resource = getResource(user.id, idOrName);
   if (!resource) {

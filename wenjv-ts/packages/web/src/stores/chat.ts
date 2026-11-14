@@ -19,6 +19,8 @@ export interface CitationItem {
   score?: number;
   image_url?: string;
   has_image?: boolean;
+  tag_matched?: boolean;
+  tag_fallback?: boolean;
   metadata?: Record<string, unknown>;
 }
 

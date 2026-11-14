@@ -25,10 +25,16 @@
               Wiki
             </a>
           </router-link>
+          <router-link v-if="auth.isSuperuser" to="/admin" custom v-slot="{ href, navigate, isActive }">
+            <a :href="href" :class="{ on: isActive }" @click="navigate">
+              <Icon name="sliders" :size="15" />
+              管理
+            </a>
+          </router-link>
         </nav>
       </div>
       <div class="right">
-        <span class="user-chip" :title="auth.email">
+        <span class="user-chip" :title="auth.email ?? undefined">
           <Icon name="user" :size="14" />
           <span class="user">{{ auth.email }}</span>
         </span>
@@ -40,7 +46,7 @@
     </header>
     <main class="main">
       <router-view v-slot="{ Component }">
-        <keep-alive :include="['ChatView', 'LibraryView', 'WikiView']">
+        <keep-alive :include="['ChatView', 'LibraryView', 'WikiView', 'AdminView']">
           <component :is="Component" />
         </keep-alive>
       </router-view>
@@ -48,7 +54,7 @@
   </div>
 </template>
 
-<script setup>
+<script setup lang="ts">
 import { useRouter } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
 import Icon from '../components/Icon.vue'
@@ -56,9 +62,9 @@ import Icon from '../components/Icon.vue'
 const auth = useAuthStore()
 const router = useRouter()
 
-function onLogout() {
+function onLogout(): void {
   auth.logout()
-  router.push({ name: 'login' })
+  void router.push({ name: 'login' })
 }
 </script>
 

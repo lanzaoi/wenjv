@@ -277,7 +277,7 @@
               title="点击查看原图"
               @click="previewImage(getCitationImageUrl(c))"
             >
-              <img :src="getCitationImageUrl(c)" class="cite-img" alt="引用图表" loading="lazy" />
+              <img :src="getCitationImageUrl(c) || undefined" class="cite-img" alt="引用图表" loading="lazy" />
               <div class="cite-img-hint"><Icon name="image" :size="13" /> 点击查看大图</div>
             </div>
             <p>{{ clip(c.page_content, 220) }}</p>
@@ -433,12 +433,12 @@
   </Teleport>
 </template>
 
-<script setup>
+<script setup lang="ts">
 import { ref, onMounted, onActivated, onBeforeUnmount, nextTick, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
-import { useChatStore } from '../stores/chat'
+import { useChatStore, type CitationItem } from '../stores/chat'
 import FileDrop from '../components/FileDrop.vue'
 import Icon from '../components/Icon.vue'
 import {
@@ -453,9 +453,28 @@ import {
   listChatModels,
   getTags,
   wikiApi,
+  type TagSummary,
 } from '../api/client'
 
 defineOptions({ name: 'ChatView' })
+
+interface WikiSavedPage {
+  id: number
+  title?: string
+}
+
+interface SseEvent {
+  type: string
+  content?: string
+  citations?: Array<Record<string, unknown>>
+  message?: string
+}
+
+interface AttachedImage {
+  media_url: string
+  preview_url: string
+  name: string
+}
 
 const router = useRouter()
 const route = useRoute()
@@ -488,30 +507,31 @@ const tabs = [
 const uploading = ref('')
 const ingestMsg = ref('')
 const ingestErr = ref('')
-const file = ref(null)
-const imageIngestFile = ref(null)
+const file = ref<File | null>(null)
+const imageIngestFile = ref<File | null>(null)
 const noteTitle = ref('')
 const noteBody = ref('')
 const linkUrl = ref('')
-const t0File = ref(null)
+const t0File = ref<File | null>(null)
 const t0Prompt = ref('')
-const scrollEl = ref(null)
-const promptEl = ref(null)
-const fileInputEl = ref(null)
-let abortCtrl = null
+const scrollEl = ref<HTMLElement | null>(null)
+const promptEl = ref<HTMLTextAreaElement | null>(null)
+const fileInputEl = ref<HTMLInputElement | null>(null)
+let abortCtrl: AbortController | null = null
 
 // Composer attached image
-const attachedImage = ref(null)
+const attachedImage = ref<AttachedImage | null>(null)
 const uploadingAttachment = ref(false)
 
-async function onFileSelected(e) {
-  const f = e.target.files?.[0]
+async function onFileSelected(e: Event) {
+  const input = e.target as HTMLInputElement | null
+  const f = input?.files?.[0]
   if (!f) return
   await handleAttachFile(f)
   if (fileInputEl.value) fileInputEl.value.value = ''
 }
 
-async function handleAttachFile(f) {
+async function handleAttachFile(f: File) {
   if (!f.type.startsWith('image/')) {
     alert('请选择图片文件')
     return
@@ -525,7 +545,7 @@ async function handleAttachFile(f) {
       name: f.name,
     }
   } catch (err) {
-    alert(`图片上传失败: ${err.message}`)
+    alert(`图片上传失败: ${err instanceof Error ? err.message : String(err)}`)
   } finally {
     uploadingAttachment.value = false
   }
@@ -538,7 +558,7 @@ function removeAttachedImage() {
   attachedImage.value = null
 }
 
-function handlePaste(e) {
+function handlePaste(e: ClipboardEvent) {
   const items = e.clipboardData?.items
   if (!items) return
   for (const item of items) {
@@ -554,12 +574,12 @@ function handlePaste(e) {
 }
 
 // Tagging state
-const availableTags = ref([])
+const availableTags = ref<TagSummary[]>([])
 const uploadTags = ref('')
 const noteTags = ref('')
 const linkTags = ref('')
 const confirmingClear = ref(false)
-const createdBlobUrls = []
+const createdBlobUrls: string[] = []
 
 // Wiki Save Modal state
 const showWikiSaveModal = ref(false)
@@ -567,9 +587,9 @@ const wikiSaveTitle = ref('')
 const wikiSaveContent = ref('')
 const wikiSaving = ref(false)
 const wikiSaveErr = ref('')
-const wikiSavedPage = ref(null)
+const wikiSavedPage = ref<WikiSavedPage | null>(null)
 
-function toggleSelectedTag(tagName) {
+function toggleSelectedTag(tagName: string) {
   const idx = selectedTags.value.indexOf(tagName)
   if (idx >= 0) {
     selectedTags.value.splice(idx, 1)
@@ -582,12 +602,12 @@ async function loadChatTags() {
   try {
     const res = await getTags(auth.token, 25)
     availableTags.value = res.tags || []
-  } catch (e) {
+  } catch {
     // ignore
   }
 }
 
-function parseInputTags(str) {
+function parseInputTags(str: string): string[] | undefined {
   if (!str) return undefined
   const arr = str.split(/[,，\s]+/).map(s => s.trim().replace(/^#+/, '')).filter(Boolean)
   return arr.length ? arr : undefined
@@ -604,8 +624,7 @@ onMounted(async () => {
   if (!chat.modelsLoaded) {
     try {
       const r = await listChatModels(auth.token)
-      let list = r.models || r || []
-      if (Array.isArray(r)) list = r
+      const list = Array.isArray(r) ? r : r.models || []
       chat.setModels(list)
     } catch {
       chat.setModels([])
@@ -680,7 +699,7 @@ async function doUpload() {
     uploadTags.value = ''
     loadChatTags()
   } catch (e) {
-    ingestErr.value = e.message
+    ingestErr.value = e instanceof Error ? e.message : String(e)
   } finally {
     chat.busy = false
     uploading.value = ''
@@ -699,16 +718,16 @@ async function doImageIngest() {
     uploadTags.value = ''
     loadChatTags()
   } catch (e) {
-    ingestErr.value = e.message
+    ingestErr.value = e instanceof Error ? e.message : String(e)
   } finally {
     chat.busy = false
     uploading.value = ''
   }
 }
 
-function saveMsgToWiki(content) {
+function saveMsgToWiki(content: string) {
   if (!content) return
-  const firstLine = content.trim().split('\n')[0].replace(/^[#\s*>-]+/, '').trim()
+  const firstLine = (content.trim().split('\n')[0] || '').replace(/^[#\s*>-]+/, '').trim()
   wikiSaveContent.value = content
   wikiSaveTitle.value = firstLine.slice(0, 40) || '知识总结'
   wikiSaveErr.value = ''
@@ -730,7 +749,7 @@ async function confirmSaveToWiki() {
     const page = await wikiApi.createPage({ title, content: wikiSaveContent.value }, auth.token)
     wikiSavedPage.value = page
   } catch (err) {
-    wikiSaveErr.value = err?.message || String(err)
+    wikiSaveErr.value = err instanceof Error ? err.message : String(err)
   } finally {
     wikiSaving.value = false
   }
@@ -757,7 +776,7 @@ async function doNote() {
     noteTags.value = ''
     loadChatTags()
   } catch (e) {
-    ingestErr.value = e.message
+    ingestErr.value = e instanceof Error ? e.message : String(e)
   } finally {
     chat.busy = false
   }
@@ -773,54 +792,54 @@ async function doLink() {
     linkTags.value = ''
     loadChatTags()
   } catch (e) {
-    ingestErr.value = e.message
+    ingestErr.value = e instanceof Error ? e.message : String(e)
   } finally {
     chat.busy = false
   }
 }
 
-function clip(s, n) {
-  s = s || ''
-  return s.length > n ? s.slice(0, n) + '…' : s
+function clip(s: string | undefined, n: number): string {
+  const text = s || ''
+  return text.length > n ? text.slice(0, n) + '…' : text
 }
-function scoreLabel(s) {
+function scoreLabel(s: number | null | undefined): string {
   if (s == null) return '-'
   return Number(s).toFixed(3)
 }
-function metaLabel(c) {
-  const m = c.metadata || {}
-  return m.title || m.filename || m.source || m.source_type || 'chunk'
+function metaLabel(c: CitationItem): string {
+  const m = (c.metadata || {}) as Record<string, unknown>
+  return String(m.title || m.filename || m.source || m.source_type || 'chunk')
 }
-function isWikiCite(c) {
-  const m = c.metadata || {}
-  const fn = m.filename || c.filename || ''
-  const st = m.source_type || c.source_type || ''
+function isWikiCite(c: CitationItem): boolean {
+  const m = (c.metadata || {}) as Record<string, unknown>
+  const fn = String(m.filename || c.filename || '')
+  const st = String(m.source_type || '')
   return st === 'wiki' || fn.startsWith('wiki://')
 }
 
-function openWikiCite(c) {
+function openWikiCite(c: CitationItem) {
   if (!isWikiCite(c)) return
-  const m = c.metadata || {}
-  const resId = m.resource_id || c.resource_id
-  if (resId) {
-    router.push({ name: 'wiki', params: { id: resId } })
+  const m = (c.metadata || {}) as Record<string, unknown>
+  const resId = m.resource_id
+  if (resId != null) {
+    router.push({ name: 'wiki', params: { id: String(resId) } })
   } else {
     router.push({ name: 'wiki' })
   }
 }
 
-function safeWindowSize() {
+function safeWindowSize(): number {
   const n = Number(windowSize.value)
-  if (isNaN(n) || n < 1) return 5
+  if (Number.isNaN(n) || n < 1) return 5
   return Math.min(50, Math.floor(n))
 }
 
-function renderMd(text) {
+function renderMd(text: string): string {
   if (!text) return ''
-  const codeBlocks = []
-  let processed = String(text).replace(/```([a-zA-Z0-9_-]*)\n([\s\S]*?)```/g, (match, lang, code) => {
+  const codeBlocks: string[] = []
+  let processed = String(text).replace(/```([a-zA-Z0-9_-]*)\n([\s\S]*?)```/g, (_match, lang, code) => {
     const id = `__CODE_BLOCK_${codeBlocks.length}__`
-    const escCode = code
+    const escCode = String(code)
       .replace(/&/g, '&amp;')
       .replace(/</g, '&lt;')
       .replace(/>/g, '&gt;')
@@ -867,7 +886,7 @@ async function sendText() {
   chat.pushMessage({
     role: 'user',
     content: effectiveText,
-    imageUrl: img ? getCitationImageUrl({ image_url: img.media_url }) : undefined,
+    imageUrl: img ? (getCitationImageUrl({ image_url: img.media_url }) ?? undefined) : undefined,
     mediaUrl: img ? img.media_url : undefined,
   })
   chat.clearCitations()
@@ -882,8 +901,8 @@ async function sendText() {
         auth.token,
         effectiveText,
         safeWindowSize(),
-        null,
-        selectedTags.value.length ? selectedTags.value : null,
+        undefined,
+        selectedTags.value.length ? selectedTags.value : undefined,
       )
       chat.setCitations(r.documents || [])
       chat.pushMessage({
@@ -893,7 +912,7 @@ async function sendText() {
           : '未检索到相关片段。',
       })
     } catch (e) {
-      chat.pushMessage({ role: 'assistant', content: `检索失败：${e.message}` })
+      chat.pushMessage({ role: 'assistant', content: `检索失败：${e instanceof Error ? e.message : String(e)}` })
     } finally {
       chat.busy = false
     }
@@ -936,7 +955,7 @@ async function doT0Search() {
         : '未检索到视觉或文本相关片段。',
     })
   } catch (e) {
-    chat.pushMessage({ role: 'assistant', content: `以图搜图失败：${e.message}` })
+    chat.pushMessage({ role: 'assistant', content: `以图搜图失败：${e instanceof Error ? e.message : String(e)}` })
   } finally {
     chat.busy = false
   }
@@ -972,7 +991,7 @@ async function doT0Chat() {
     )
     chat.endStream(true)
   } catch (e) {
-    if (e.name !== 'AbortError') {
+    if (e instanceof Error && e.name !== 'AbortError') {
       chat.endStream(false)
       chat.pushMessage({ role: 'assistant', content: `图问对话失败：${e.message}` })
     } else {
@@ -981,14 +1000,14 @@ async function doT0Chat() {
   }
 }
 
-async function runStreamChat(payload) {
+async function runStreamChat(payload: Record<string, unknown>) {
   chat.beginStream()
   abortCtrl = new AbortController()
   try {
     await streamChat(auth.token, payload, onSse, abortCtrl.signal)
     chat.endStream(true)
   } catch (e) {
-    if (e.name !== 'AbortError') {
+    if (e instanceof Error && e.name !== 'AbortError') {
       chat.endStream(false)
       chat.pushMessage({ role: 'assistant', content: `对话失败：${e.message}` })
     } else {
@@ -997,15 +1016,18 @@ async function runStreamChat(payload) {
   }
 }
 
-const previewModalUrl = ref(null)
+const previewModalUrl = ref<string | null>(null)
 
-function previewImage(url) {
-  previewModalUrl.value = url
+function previewImage(url: string | null | undefined) {
+  if (url) previewModalUrl.value = url
 }
 
-function getCitationImageUrl(c) {
+function getCitationImageUrl(c: string | Partial<CitationItem> | Record<string, unknown> | null | undefined): string | null {
   if (!c) return null
-  const url = typeof c === 'string' ? c : (c.image_url || c.metadata?.image_url)
+  const url =
+    typeof c === 'string'
+      ? c
+      : (c as CitationItem).image_url || ((c as CitationItem).metadata?.image_url as string | undefined)
   if (!url) return null
   if (url.startsWith('blob:') || url.startsWith('data:')) return url
   if (url.includes('token=')) return url
@@ -1014,20 +1036,23 @@ function getCitationImageUrl(c) {
   return `${url}${sep}token=${encodeURIComponent(auth.token)}`
 }
 
-function onSse(ev) {
+function onSse(ev: SseEvent) {
   if (ev.type === 'token') chat.appendStream(ev.content || '')
   else if (ev.type === 'citations') {
     chat.setCitations(
-      (ev.citations || []).map((c) => ({
-        page_content: c.page_content || c.snippet || '',
-        score: c.score,
-        tag_matched: c.tag_matched ?? c.metadata?.tag_matched,
-        tag_fallback: c.tag_fallback ?? c.metadata?.tag_fallback,
-        has_image: c.has_image ?? c.metadata?.has_image,
-        image_url: c.image_url ?? c.metadata?.image_url,
-        image_path: c.image_path ?? c.metadata?.image_path,
-        metadata: c.metadata || c,
-      })),
+      (ev.citations || []).map((c: Record<string, unknown>) => {
+        const meta = (c.metadata || c) as Record<string, unknown>
+        return {
+          page_content: String(c.page_content || c.snippet || ''),
+          score: c.score as number | undefined,
+          tag_matched: (c.tag_matched ?? meta.tag_matched) as boolean | undefined,
+          tag_fallback: (c.tag_fallback ?? meta.tag_fallback) as boolean | undefined,
+          has_image: Boolean(c.has_image ?? meta.has_image),
+          image_url: (c.image_url ?? meta.image_url) as string | undefined,
+          image_path: c.image_path ?? meta.image_path,
+          metadata: meta,
+        } as CitationItem
+      }),
     )
   } else if (ev.type === 'error') {
     chat.appendStream(`\n[错误] ${ev.message || 'chat error'}`)

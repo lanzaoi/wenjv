@@ -56,28 +56,43 @@
   </div>
 </template>
 
-<script setup>
+<script setup lang="ts">
 import { ref, watch, nextTick } from 'vue'
 import { wikiApi } from '../../api/client'
 import { useAuthStore } from '../../stores/auth'
 
-const props = defineProps({
-  isOpen: {
-    type: Boolean,
-    default: false,
-  },
-})
+interface WikiSearchResult {
+  id: number
+  title: string
+  icon?: string
+  match_source?: string
+  path?: string
+  snippet?: string
+}
 
-const emit = defineEmits(['close', 'select-page', 'create-page'])
+const props = withDefaults(
+  defineProps<{
+    isOpen?: boolean
+  }>(),
+  {
+    isOpen: false,
+  },
+)
+
+const emit = defineEmits<{
+  close: []
+  'select-page': [id: number]
+  'create-page': [title: string]
+}>()
 
 const authStore = useAuthStore()
 const query = ref('')
-const results = ref([])
+const results = ref<WikiSearchResult[]>([])
 const loading = ref(false)
 const selectedIndex = ref(0)
-const inputRef = ref(null)
+const inputRef = ref<HTMLInputElement | null>(null)
 
-let searchTimeout = null
+let searchTimeout: ReturnType<typeof setTimeout> | null = null
 
 watch(
   () => props.isOpen,
@@ -105,7 +120,7 @@ watch(query, (val) => {
   searchTimeout = setTimeout(async () => {
     try {
       const data = await wikiApi.searchWiki(q, authStore.token)
-      results.value = Array.isArray(data) ? data : []
+      results.value = Array.isArray(data) ? (data as WikiSearchResult[]) : []
       selectedIndex.value = 0
     } catch (err) {
       console.warn('Wiki search error:', err)
@@ -120,7 +135,7 @@ function close() {
   emit('close')
 }
 
-function selectItem(item) {
+function selectItem(item: WikiSearchResult) {
   emit('select-page', item.id)
   close()
 }
@@ -131,7 +146,7 @@ function createNewPage() {
   close()
 }
 
-function handleKeydown(e) {
+function handleKeydown(e: KeyboardEvent) {
   if (e.isComposing) return
   if (e.key === 'Escape') {
     e.preventDefault()
@@ -152,8 +167,9 @@ function handleKeydown(e) {
       // Still searching, ignore premature Enter to prevent ghost page creation
       return
     }
-    if (results.value.length > 0 && results.value[selectedIndex.value]) {
-      selectItem(results.value[selectedIndex.value])
+    const current = results.value[selectedIndex.value]
+    if (current) {
+      selectItem(current)
     } else if (query.value.trim()) {
       createNewPage()
     }

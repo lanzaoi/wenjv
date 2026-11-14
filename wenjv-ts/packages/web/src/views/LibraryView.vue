@@ -17,7 +17,7 @@
           <Icon name="upload" :size="15" />
           <span>批量导入</span>
         </button>
-        <button class="btn btn-secondary" type="button" :disabled="loading" @click="reload">
+        <button class="btn btn-secondary" type="button" :disabled="loading" @click="() => reload()">
           <Icon name="refresh" :size="15" :spin="loading" />
           <span>{{ loading ? '刷新中' : '刷新' }}</span>
         </button>
@@ -136,7 +136,16 @@
             class="resource-row"
             @click="openDetail(item)"
           >
-            <div class="row-ico"><Icon :name="sec.rowIcon" :size="16" /></div>
+            <div class="row-ico">
+              <img
+                v-if="isImageResource(item) && auth.token"
+                :src="resourceContentUrl(item.id, auth.token)"
+                class="row-thumb"
+                loading="lazy"
+                :alt="item.filename || item.title || '图片'"
+              />
+              <Icon v-else :name="isImageResource(item) ? 'image' : sec.rowIcon" :size="16" />
+            </div>
             <div class="row-body">
               <div class="row-main">
                 <strong>{{ item.title || item.filename || item.source_url }}</strong>
@@ -227,6 +236,16 @@
                 <span v-if="!selectedResource.tags?.length" class="muted" style="font-size: 12px">无标签</span>
               </div>
             </div>
+            <div v-if="isImageResource(selectedResource) && auth.token" class="detail-kv">
+              <span>图片预览</span>
+              <div class="detail-image-wrap">
+                <img
+                  :src="resourceContentUrl(selectedResource.id, auth.token)"
+                  class="detail-image-preview"
+                  :alt="selectedResource.filename || selectedResource.title || '图片预览'"
+                />
+              </div>
+            </div>
             <div v-if="detailLoading" class="muted" style="font-size: 12px">加载提取文本中…</div>
             <div v-else-if="detailContent" class="detail-kv">
               <span>已提取 / 索引文本</span>
@@ -281,31 +300,52 @@
   </div>
 </template>
 
-<script setup>
+<script setup lang="ts">
 import { ref, onMounted, onActivated, onDeactivated, onBeforeUnmount, computed, nextTick } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useRouter } from 'vue-router'
 import { useLibraryStore } from '../stores/library'
 import { useAuthStore } from '../stores/auth'
-import { getResourceDetail, reingestResource } from '../api/client.js'
+import {
+  getResourceDetail,
+  reingestResource,
+  resourceContentUrl,
+  type ResourceItem,
+  type ResourceType,
+} from '../api/client.js'
 import Icon from '../components/Icon.vue'
 import StatusDot from '../components/StatusDot.vue'
 import ImportModal from '../components/ImportModal.vue'
 
 defineOptions({ name: 'LibraryView' })
 
-const sections = [
+interface SectionDef {
+  type: ResourceType
+  label: string
+  icon: string
+  rowIcon: string
+}
+
+const sections: SectionDef[] = [
   { type: 'file', label: '文件', icon: 'file', rowIcon: 'file' },
   { type: 'note', label: '笔记', icon: 'note', rowIcon: 'note' },
   { type: 'link', label: '链接', icon: 'globe', rowIcon: 'link' },
 ]
 
-const typeFilters = [
+const typeFilters: Array<{ value: 'all' | ResourceType; label: string }> = [
   { value: 'all', label: '全部' },
   { value: 'file', label: '文件' },
   { value: 'note', label: '笔记' },
   { value: 'link', label: '链接' },
 ]
+
+const IMAGE_EXT_RE = /\.(png|jpe?g|webp|gif|bmp|tiff?)$/i
+
+function isImageResource(item: ResourceItem | null | undefined): boolean {
+  if (!item || item.type !== 'file') return false
+  const name = item.original_filename || item.filename || item.title || ''
+  return IMAGE_EXT_RE.test(name)
+}
 
 const router = useRouter()
 const auth = useAuthStore()
@@ -324,16 +364,16 @@ const {
 
 const tagActionMessage = ref('')
 const showImportModal = ref(false)
-const importTab = ref('batch')
-let pollTimer = null
+const importTab = ref<'batch' | 'legacy'>('batch')
+let pollTimer: ReturnType<typeof setTimeout> | null = null
 let isViewActive = true
 
-const editingKey = ref(null)
+const editingKey = ref<number | null>(null)
 const editingInput = ref('')
 const savingTags = ref(false)
-const tagInputRef = ref(null)
+const tagInputRef = ref<HTMLInputElement | HTMLInputElement[] | null>(null)
 
-const pendingDeleteItem = ref(null)
+const pendingDeleteItem = ref<ResourceItem | null>(null)
 const deleting = ref(false)
 const detailContent = ref('')
 const detailLoading = ref(false)
@@ -346,14 +386,15 @@ const visibleSections = computed(() => {
   return sections.filter((s) => s.type === activeType.value)
 })
 
-function byType(type) {
+function byType(type: ResourceType): ResourceItem[] {
   return resources.value.filter((r) => r.type === type)
 }
 
-function filteredByType(type) {
+function filteredByType(type: ResourceType): ResourceItem[] {
   let list = byType(type)
   if (activeTag.value) {
-    list = list.filter((item) => (item.tags || []).includes(activeTag.value))
+    const targetTag = activeTag.value
+    list = list.filter((item) => (item.tags || []).includes(targetTag))
   }
   const q = searchQuery.value.trim().toLowerCase()
   if (q) {
@@ -374,7 +415,7 @@ function filteredByType(type) {
   return list
 }
 
-function startEdit(item) {
+function startEdit(item: ResourceItem) {
   editingKey.value = item.id
   editingInput.value = (item.tags || []).join(', ')
   nextTick(() => {
@@ -393,7 +434,7 @@ function cancelEdit() {
   editingInput.value = ''
 }
 
-async function saveTags(item) {
+async function saveTags(item: ResourceItem) {
   if (!item.id) return
   savingTags.value = true
   try {
@@ -404,13 +445,13 @@ async function saveTags(item) {
     await library.saveItemTags(item.id, rawList)
     cancelEdit()
   } catch (err) {
-    library.error = '更新标签失败: ' + (err?.message || err)
+    library.error = '更新标签失败: ' + (err instanceof Error ? err.message : String(err))
   } finally {
     savingTags.value = false
   }
 }
 
-async function openDetail(item) {
+async function openDetail(item: ResourceItem) {
   library.selectedResourceId = item.id
   detailContent.value = ''
   reingestMessage.value = ''
@@ -427,7 +468,7 @@ async function openDetail(item) {
   }
 }
 
-async function triggerReingest(item, mode = 'auto') {
+async function triggerReingest(item: ResourceItem, mode: 'auto' | 'formula' = 'auto') {
   if (!item?.id || reingesting.value) return
   reingesting.value = true
   reingestMessage.value = ''
@@ -438,7 +479,7 @@ async function triggerReingest(item, mode = 'auto') {
       : '已加入重新索引队列，稍后自动更新。'
     await reload({ silent: true })
   } catch (err) {
-    reingestMessage.value = '入队失败: ' + (err?.message || err)
+    reingestMessage.value = '入队失败: ' + (err instanceof Error ? err.message : String(err))
   } finally {
     reingesting.value = false
   }
@@ -450,7 +491,7 @@ function closeDetail() {
   reingestMessage.value = ''
 }
 
-function askDeleteResource(item) {
+function askDeleteResource(item: ResourceItem) {
   pendingDeleteItem.value = item
 }
 
@@ -461,13 +502,13 @@ async function confirmDeleteResource() {
     await library.removeItem(pendingDeleteItem.value.id)
     pendingDeleteItem.value = null
   } catch (err) {
-    library.error = '删除资源失败: ' + (err?.message || err)
+    library.error = '删除资源失败: ' + (err instanceof Error ? err.message : String(err))
   } finally {
     deleting.value = false
   }
 }
 
-function formatDate(v) {
+function formatDate(v: string | null | undefined) {
   if (!v) return ''
   try {
     const d = new Date(v)
@@ -478,7 +519,7 @@ function formatDate(v) {
   }
 }
 
-function openImport(tab) {
+function openImport(tab: 'batch' | 'legacy') {
   importTab.value = tab
   showImportModal.value = true
 }
@@ -508,7 +549,7 @@ function schedulePollIfPending() {
   }
 }
 
-async function reload(opts = {}) {
+async function reload(opts: { silent?: boolean } = {}) {
   await library.reload(opts)
   schedulePollIfPending()
 }
@@ -1032,6 +1073,28 @@ li:hover {
   border: 1px solid rgba(2, 132, 199, 0.25);
   color: #0369a1;
   font-size: 12.5px;
+}
+.row-thumb {
+  width: 30px;
+  height: 30px;
+  border-radius: 7px;
+  object-fit: cover;
+  display: block;
+}
+.detail-image-wrap {
+  margin-top: 4px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  padding: 8px;
+  display: flex;
+  justify-content: center;
+}
+.detail-image-preview {
+  max-width: 100%;
+  max-height: 260px;
+  border-radius: 6px;
+  object-fit: contain;
 }
 .btn-danger-solid {
   background: var(--danger);

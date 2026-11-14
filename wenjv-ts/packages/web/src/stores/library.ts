@@ -44,7 +44,9 @@ export const useLibraryStore = defineStore('library', {
       return state.resources.find((r) => r.id === state.selectedResourceId) ?? null;
     },
     hasActiveJobs(state): boolean {
-      return state.resources.some((r) => r.status === 'pending' || r.status === 'processing');
+      return state.resources.some(
+        (r) => r.status === 'pending' || r.status === 'in_progress' || r.status === 'processing'
+      );
     },
   },
   actions: {

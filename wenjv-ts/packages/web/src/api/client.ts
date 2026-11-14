@@ -82,11 +82,29 @@ export async function register(email: string, password: string): Promise<any> {
   });
 }
 
-export async function validateToken(token: string): Promise<{ valid: boolean; user_id?: number }> {
+export interface UserMe {
+  id: number;
+  email: string;
+  username: string | null;
+  is_active: boolean;
+  is_superuser: boolean;
+  is_verified: boolean;
+}
+
+export async function validateToken(token: string): Promise<{
+  valid: boolean;
+  user_id?: number;
+  email?: string;
+  is_superuser?: boolean;
+}> {
   return apiJson('/auth/validate-token', {
     method: 'POST',
     body: { token },
   });
+}
+
+export async function getMe(token: string): Promise<UserMe> {
+  return apiJson('/auth/users/me', { token });
 }
 
 export type ResourceType = 'file' | 'note' | 'link';
@@ -187,6 +205,90 @@ export async function reingestResource(
     token,
     body: { ocr_mode: ocrMode },
   });
+}
+
+export function resourceContentUrl(resourceId: number | string, token?: string | null): string {
+  const qs = token ? `?token=${encodeURIComponent(token)}` : '';
+  return `/api/resources/${encodeURIComponent(String(resourceId))}/content${qs}`;
+}
+
+export interface AdminStats {
+  total_queries: number;
+  avg_latency_ms: number;
+  v_hit_rate: number;
+  fts5_hit_rate: number;
+  s_hit_rate: number;
+  cache_hit_rate: number;
+  error_rate: number;
+  last_24h_queries: number;
+  counts: {
+    users: number;
+    resources: number;
+    files: number;
+    notes: number;
+    links: number;
+    chunks: number;
+    assets: number;
+    tags: number;
+    wiki_pages: number;
+    queries: number;
+  };
+  jobs?: Record<string, number>;
+  runtime?: {
+    ocr?: { ok: boolean; status?: string; engines?: Record<string, unknown> };
+    siglip2_vision?: boolean;
+  };
+  api_calls: Array<{
+    provider: string;
+    call_type: string;
+    call_count: number;
+    last_reset: string | null;
+  }>;
+}
+
+export interface AdminQueryLog {
+  id: number;
+  query: string;
+  timestamp: string;
+  latency_ms: number;
+  v_hits: number;
+  fts5_hits: number;
+  s_hits: number;
+  total_hits: number;
+  cache_hit: number;
+  error: string | null;
+}
+
+export interface IngestionJobItem {
+  id: number;
+  entity_type: string;
+  entity_id: number;
+  status: string;
+  attempts: number;
+  max_attempts: number;
+  last_error: string | null;
+  created_at: string;
+  updated_at: string | null;
+}
+
+export async function getAdminStats(token: string | null): Promise<AdminStats> {
+  return apiJson('/admin/stats', { token });
+}
+
+export async function getAdminLogs(token: string | null, limit = 50): Promise<{ logs: AdminQueryLog[] }> {
+  return apiJson(`/admin/logs?limit=${limit}`, { token });
+}
+
+export async function resetAdminCounts(token: string | null): Promise<{ message: string }> {
+  return apiJson('/admin/reset-counts', { method: 'POST', token });
+}
+
+export async function listJobs(token: string | null): Promise<IngestionJobItem[]> {
+  return apiJson('/jobs', { token });
+}
+
+export async function retryJob(token: string | null, jobId: number): Promise<{ status: string; job_id: number }> {
+  return apiJson(`/jobs/${jobId}/retry`, { method: 'POST', token });
 }
 
 export interface LegacyImportPreview {

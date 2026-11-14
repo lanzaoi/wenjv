@@ -40,19 +40,31 @@
   </label>
 </template>
 
-<script setup>
+<script setup lang="ts">
 import { ref, watch, computed, onBeforeUnmount } from 'vue'
 import Icon from './Icon.vue'
 
-const props = defineProps({
-  accept: { type: String, default: '' },
-  title: { type: String, default: '拖拽或点击上传' },
-  subtitle: { type: String, default: '支持常见文档与图片格式' },
-  icon: { type: String, default: 'upload' },
-  disabled: { type: Boolean, default: false },
-  modelValue: { type: null, default: null },
-})
-const emit = defineEmits(['update:modelValue'])
+const props = withDefaults(
+  defineProps<{
+    accept?: string
+    title?: string
+    subtitle?: string
+    icon?: string
+    disabled?: boolean
+    modelValue?: File | null
+  }>(),
+  {
+    accept: '',
+    title: '拖拽或点击上传',
+    subtitle: '支持常见文档与图片格式',
+    icon: 'upload',
+    disabled: false,
+    modelValue: null,
+  },
+)
+const emit = defineEmits<{
+  'update:modelValue': [file: File | null]
+}>()
 
 const dragover = ref(false)
 const fileName = ref('')
@@ -67,18 +79,18 @@ const fileIcon = computed(() => {
   return 'file'
 })
 
-function fmtSize(n) {
+function fmtSize(n: number) {
   if (n < 1024) return `${n} B`
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
   return `${(n / (1024 * 1024)).toFixed(1)} MB`
 }
 
-function setFile(file) {
+function setFile(file: File | null) {
   emit('update:modelValue', file || null)
   applyMeta(file)
 }
 
-function applyMeta(file) {
+function applyMeta(file: File | null | undefined) {
   if (previewUrl.value) {
     URL.revokeObjectURL(previewUrl.value)
     previewUrl.value = ''
@@ -103,10 +115,11 @@ watch(
   { immediate: true },
 )
 
-function onChange(e) {
-  const f = e.target.files?.[0] || null
+function onChange(e: Event) {
+  const input = e.target as HTMLInputElement | null
+  const f = input?.files?.[0] || null
   setFile(f)
-  e.target.value = ''
+  if (input) input.value = ''
 }
 function onEnter() {
   dragDepth += 1
@@ -116,11 +129,11 @@ function onLeave() {
   dragDepth = Math.max(0, dragDepth - 1)
   if (dragDepth === 0) dragover.value = false
 }
-function onDrop(e) {
+function onDrop(e: DragEvent) {
   dragDepth = 0
   dragover.value = false
   if (props.disabled) return
-  const f = e.dataTransfer?.files?.[0]
+  const f = e.dataTransfer?.files?.[0] || null
   if (f) setFile(f)
 }
 function clear() {

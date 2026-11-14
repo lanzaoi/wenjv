@@ -132,18 +132,77 @@ describe('Unified Links, SSRF, Admin & Health Routes (Schema v2)', () => {
     });
     expect(failStats.status).toBe(403);
 
-    const okStats = await env.app.request('/admin/stats', {
+    const okStats = await env.app.request('/api/admin/stats', {
       method: 'GET',
       headers: { Authorization: `Bearer ${adminToken}` },
     });
     expect(okStats.status).toBe(200);
     const statsData = (await okStats.json()) as {
       counts: { users: number; resources: number; chunks: number; assets: number; tags: number };
+      runtime: { siglip2_vision: boolean; ocr: { ok: boolean } };
+      jobs: Record<string, number>;
     };
     expect(statsData.counts.users).toBeGreaterThanOrEqual(2);
     expect(statsData.counts.resources).toBeDefined();
     expect(statsData.counts.chunks).toBeDefined();
     expect(statsData.counts.assets).toBeDefined();
     expect(statsData.counts.tags).toBeDefined();
+    expect(typeof statsData.runtime.siglip2_vision).toBe('boolean');
+    expect(statsData.jobs).toBeDefined();
+
+    // Protect /admin SSR HTML dashboard + escape XSS
+    const unauthHtml = await env.app.request('/admin');
+    expect(unauthHtml.status).toBe(401);
+    const userHtml = await env.app.request('/admin', {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    expect(userHtml.status).toBe(403);
+
+    const db = getDb();
+    db.prepare(`
+      INSERT INTO query_logs(query, latency_ms, v_hits, fts5_hits, s_hits, total_hits, cache_hit, error)
+      VALUES ('<script>alert(1)</script>', 12.5, 1, 2, 0, 3, 0, '<img onerror=x>')
+    `).run();
+
+    const adminHtmlResp = await env.app.request(`/admin?token=${adminToken}`);
+    expect(adminHtmlResp.status).toBe(200);
+    const htmlBody = await adminHtmlResp.text();
+    expect(htmlBody).not.toContain('<script>alert(1)</script>');
+    expect(htmlBody).toContain('&lt;script&gt;alert(1)&lt;/script&gt;');
+    expect(htmlBody).toContain('&lt;img onerror=x&gt;');
+
+    const logsResp = await env.app.request('/api/admin/logs?limit=10', {
+      headers: { Authorization: `Bearer ${adminToken}` },
+    });
+    expect(logsResp.status).toBe(200);
+    const logsJson = (await logsResp.json()) as { logs: Array<{ query: string }> };
+    expect(logsJson.logs.some((l) => l.query.includes('alert(1)'))).toBe(true);
+
+    const jobsResp = await env.app.request('/api/jobs', {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    expect(jobsResp.status).toBe(200);
+
+    // Browser HTML navigation on / and /wiki/* serves built SPA when dist exists
+    const browserRoot = await env.app.request('/', {
+      headers: { Accept: 'text/html,application/xhtml+xml' },
+    });
+    expect(browserRoot.status).toBe(200);
+    expect(browserRoot.headers.get('content-type')).toContain('text/html');
+    const spaHtml = await browserRoot.text();
+    expect(spaHtml).toContain('<div id="app">');
+
+    const browserDeepLink = await env.app.request('/library', {
+      headers: { Accept: 'text/html,application/xhtml+xml' },
+    });
+    expect(browserDeepLink.status).toBe(200);
+    expect(await browserDeepLink.text()).toContain('<div id="app">');
+
+    // Browser HTML navigation to /admin without token gets SPA shell; API request without token still gets 401
+    const browserAdminSpa = await env.app.request('/admin', {
+      headers: { Accept: 'text/html,application/xhtml+xml' },
+    });
+    expect(browserAdminSpa.status).toBe(200);
+    expect(await browserAdminSpa.text()).toContain('<div id="app">');
   });
 });

@@ -96,7 +96,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { computed, nextTick, onActivated, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { useWikiStore, type WikiTreeNode } from '../stores/wiki';
 import WikiTree from '../components/wiki/WikiTree.vue';
@@ -104,6 +104,8 @@ import WikiEditor from '../components/wiki/WikiEditor.vue';
 import WikiSidebar from '../components/wiki/WikiSidebar.vue';
 import WikiGraphModal from '../components/wiki/WikiGraphModal.vue';
 import WikiCommandModal from '../components/wiki/WikiCommandModal.vue';
+
+defineOptions({ name: 'WikiView' });
 
 const route = useRoute();
 const router = useRouter();
@@ -199,21 +201,33 @@ function handleBeforeUnload(e: BeforeUnloadEvent) {
   }
 }
 
-onMounted(async () => {
-  window.addEventListener('keydown', handleGlobalKeys);
-  window.addEventListener('beforeunload', handleBeforeUnload);
+async function syncWikiViewOnEnter() {
   try {
     const tree = await wikiStore.loadTree();
     const rawId = route.params.id;
     const paramId = rawId ? Number(Array.isArray(rawId) ? rawId[0] : rawId) : NaN;
     if (Number.isFinite(paramId) && paramId > 0) {
-      await handleSelectPage(paramId);
+      if (wikiStore.currentPage?.id !== paramId) {
+        await handleSelectPage(paramId);
+      }
+    } else if (wikiStore.currentPage) {
+      await router.replace({ name: 'wiki', params: { id: String(wikiStore.currentPage.id) } });
     } else if (tree.length > 0) {
       await handleSelectPage(tree[0]!.id);
     }
   } catch (err: unknown) {
     showToast(`加载知识库目录失败：${err instanceof Error ? err.message : String(err)}`, 'error');
   }
+}
+
+onMounted(async () => {
+  window.addEventListener('keydown', handleGlobalKeys);
+  window.addEventListener('beforeunload', handleBeforeUnload);
+  await syncWikiViewOnEnter();
+});
+
+onActivated(() => {
+  void syncWikiViewOnEnter();
 });
 
 onBeforeUnmount(() => {

@@ -8,15 +8,23 @@
                     <div class="side-head-top">
                       <h2>知识录入</h2>
                       <button
-                        v-if="messages.length"
+                        v-if="messages.length && !confirmingClear"
                         type="button"
                         class="btn btn-ghost btn-sm clear-chat"
                         title="清空当前对话"
-                        @click="onClearChat"
+                        @click="confirmingClear = true"
                       >
                         <Icon name="x" :size="14" />
                         清空对话
                       </button>
+                      <div v-else-if="messages.length && confirmingClear" class="clear-confirm-inline">
+                        <button type="button" class="btn btn-ghost btn-sm clear-chat is-confirm" @click="confirmClearChat">
+                          确认清空
+                        </button>
+                        <button type="button" class="btn btn-ghost btn-sm clear-chat" @click="confirmingClear = false">
+                          取消
+                        </button>
+                      </div>
                     </div>
                     <p class="muted tip">文件 · 图片 · 笔记 · 链接 → 异步入库</p>
                   </div>
@@ -255,11 +263,11 @@
             <div class="cite-top">
               <span class="score-pill">{{ scoreLabel(c.score) }}</span>
               <span v-if="isWikiCite(c)" class="tag-status-badge matched wiki-badge" @click.stop="openWikiCite(c)">
-                📖 Wiki 页面
+                Wiki 页面
               </span>
               <span v-else-if="c.tag_matched || c.metadata?.tag_matched" class="tag-status-badge matched">标签命中</span>
               <span v-else-if="c.tag_fallback || c.metadata?.tag_fallback" class="tag-status-badge fallback">全库补充</span>
-              <span class="src" :class="{ 'cursor-pointer hover:underline text-indigo-600': isWikiCite(c) }" @click="openWikiCite(c)">
+              <span class="src" :class="{ 'is-wiki-link': isWikiCite(c) }" @click="openWikiCite(c)">
                 {{ metaLabel(c) }}
               </span>
             </div>
@@ -342,6 +350,15 @@
           </button>
           <span class="muted kbd-hint">可直接粘贴截图 · Enter 发送</span>
           <button
+            v-if="streaming"
+            class="btn btn-secondary btn-sm stop-btn"
+            type="button"
+            title="停止生成"
+            @click="stopStreaming"
+          >
+            停止生成
+          </button>
+          <button
             class="btn btn-primary btn-icon send-btn"
             type="submit"
             :disabled="(!prompt.trim() && !attachedImage) || busy || uploadingAttachment"
@@ -355,6 +372,53 @@
       </form>
 </section>
   </div>
+
+  <!-- Save Message to Wiki Modal (non-blocking replacement for window.prompt) -->
+  <Teleport to="body">
+    <div v-if="showWikiSaveModal" class="wiki-save-backdrop" @click.self="closeWikiSaveModal">
+      <div class="wiki-save-dialog" role="dialog" aria-modal="true" aria-label="沉淀至 Wiki">
+        <h4>沉淀至 Wiki 知识库</h4>
+        <p class="wiki-save-sub">将该回答保存为结构化 Wiki 页面，后续可继续编辑与建立双向链接。</p>
+        <div v-if="wikiSaveErr" class="error-banner" style="margin-bottom: 10px">{{ wikiSaveErr }}</div>
+        <div v-if="wikiSavedPage" class="success-banner" style="margin-bottom: 12px">
+          <Icon name="check" :size="15" />
+          <span>已保存至「{{ wikiSavedPage.title }}」</span>
+        </div>
+        <div v-if="!wikiSavedPage" class="field">
+          <label for="wiki-save-title">页面标题</label>
+          <input
+            id="wiki-save-title"
+            v-model="wikiSaveTitle"
+            placeholder="请输入 Wiki 页面标题"
+            :disabled="wikiSaving"
+            @keydown.enter.prevent="confirmSaveToWiki"
+          />
+        </div>
+        <div class="wiki-save-actions">
+          <button type="button" class="btn btn-secondary btn-sm" :disabled="wikiSaving" @click="closeWikiSaveModal">
+            {{ wikiSavedPage ? '留在对话' : '取消' }}
+          </button>
+          <button
+            v-if="wikiSavedPage"
+            type="button"
+            class="btn btn-primary btn-sm"
+            @click="goToSavedWikiPage"
+          >
+            前往 Wiki 查看
+          </button>
+          <button
+            v-else
+            type="button"
+            class="btn btn-primary btn-sm"
+            :disabled="!wikiSaveTitle.trim() || wikiSaving"
+            @click="confirmSaveToWiki"
+          >
+            {{ wikiSaving ? '保存中…' : '确认保存' }}
+          </button>
+        </div>
+      </div>
+    </div>
+  </Teleport>
 
   <!-- Image Preview Modal -->
   <Teleport to="body">
@@ -370,7 +434,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onBeforeUnmount, onDeactivated, nextTick, watch } from 'vue'
+import { ref, onMounted, onActivated, onBeforeUnmount, nextTick, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
@@ -407,6 +471,7 @@ const {
   models,
   prompt,
   tab,
+  selectedTags,
   streaming,
   streamText,
   busy,
@@ -490,10 +555,19 @@ function handlePaste(e) {
 
 // Tagging state
 const availableTags = ref([])
-const selectedTags = ref([])
 const uploadTags = ref('')
 const noteTags = ref('')
 const linkTags = ref('')
+const confirmingClear = ref(false)
+const createdBlobUrls = []
+
+// Wiki Save Modal state
+const showWikiSaveModal = ref(false)
+const wikiSaveTitle = ref('')
+const wikiSaveContent = ref('')
+const wikiSaving = ref(false)
+const wikiSaveErr = ref('')
+const wikiSavedPage = ref(null)
 
 function toggleSelectedTag(tagName) {
   const idx = selectedTags.value.indexOf(tagName)
@@ -548,18 +622,24 @@ watch([messages, streamText], async () => {
   if (scrollEl.value) scrollEl.value.scrollTop = scrollEl.value.scrollHeight
 }, { deep: true })
 
+onActivated(async () => {
+  void loadChatTags()
+  await nextTick()
+  autoGrow()
+  if (scrollEl.value && (streaming.value || messages.value.length > 0)) {
+    scrollEl.value.scrollTop = scrollEl.value.scrollHeight
+  }
+})
+
 onBeforeUnmount(() => {
   if (abortCtrl) {
     abortCtrl.abort()
     abortCtrl = null
   }
-})
-
-onDeactivated(() => {
-  if (abortCtrl) {
-    abortCtrl.abort()
-    abortCtrl = null
+  for (const url of createdBlobUrls) {
+    URL.revokeObjectURL(url)
   }
+  createdBlobUrls.length = 0
 })
 
 function clearIngestFlash() {
@@ -567,16 +647,25 @@ function clearIngestFlash() {
   ingestErr.value = ''
 }
 
-function onClearChat() {
+function confirmClearChat() {
+  confirmingClear.value = false
   if (!messages.value.length && !citations.value.length) return
-  if (!window.confirm('清空当前对话与引用？')) return
   chat.resetSession()
   nextTick(autoGrow)
 }
 
+function stopStreaming() {
+  if (abortCtrl) {
+    abortCtrl.abort()
+    abortCtrl = null
+  }
+}
+
 function t0PreviewUrl() {
   if (!t0File.value) return ''
-  return URL.createObjectURL(t0File.value)
+  const url = URL.createObjectURL(t0File.value)
+  createdBlobUrls.push(url)
+  return url
 }
 
 async function doUpload() {
@@ -617,20 +706,43 @@ async function doImageIngest() {
   }
 }
 
-async function saveMsgToWiki(content) {
+function saveMsgToWiki(content) {
   if (!content) return
   const firstLine = content.trim().split('\n')[0].replace(/^[#\s*>-]+/, '').trim()
-  const title = prompt('请输入新 Wiki 页面标题：', firstLine.slice(0, 30) || '知识总结')
-  if (!title) return
+  wikiSaveContent.value = content
+  wikiSaveTitle.value = firstLine.slice(0, 40) || '知识总结'
+  wikiSaveErr.value = ''
+  wikiSavedPage.value = null
+  showWikiSaveModal.value = true
+}
+
+function closeWikiSaveModal() {
+  if (wikiSaving.value) return
+  showWikiSaveModal.value = false
+}
+
+async function confirmSaveToWiki() {
+  const title = wikiSaveTitle.value.trim()
+  if (!title || wikiSaving.value) return
+  wikiSaving.value = true
+  wikiSaveErr.value = ''
   try {
-    const page = await wikiApi.createPage({ title, content }, auth.token)
-    if (page?.id) {
-      if (confirm(`已成功沉淀至 Wiki 页面 "${page.title}"！是否立即前往查看？`)) {
-        router.push({ name: 'wiki', params: { id: page.id } })
-      }
-    }
+    const page = await wikiApi.createPage({ title, content: wikiSaveContent.value }, auth.token)
+    wikiSavedPage.value = page
   } catch (err) {
-    alert(`沉淀至 Wiki 失败: ${err.message || err}`)
+    wikiSaveErr.value = err?.message || String(err)
+  } finally {
+    wikiSaving.value = false
+  }
+}
+
+function goToSavedWikiPage() {
+  const pageId = wikiSavedPage.value?.id
+  showWikiSaveModal.value = false
+  if (pageId) {
+    router.push({ name: 'wiki', params: { id: String(pageId) } })
+  } else {
+    router.push({ name: 'wiki' })
   }
 }
 
@@ -721,6 +833,11 @@ function renderMd(text) {
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
 
+  processed = processed.replace(/^### (.+)$/gm, '<h4 class="md-h">$1</h4>')
+  processed = processed.replace(/^## (.+)$/gm, '<h3 class="md-h">$1</h3>')
+  processed = processed.replace(/^# (.+)$/gm, '<h2 class="md-h">$1</h2>')
+  processed = processed.replace(/^&gt; (.+)$/gm, '<blockquote class="md-quote">$1</blockquote>')
+  processed = processed.replace(/^[-*] (.+)$/gm, '<div class="md-li">• $1</div>')
   processed = processed.replace(/`([^`\n]+)`/g, '<code class="inline-code">$1</code>')
   processed = processed.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
   processed = processed.replace(/\*([^*]+)\*/g, '<em>$1</em>')
@@ -729,6 +846,7 @@ function renderMd(text) {
     '<a href="$2" target="_blank" rel="noopener noreferrer" class="chat-link">$1</a>'
   )
   processed = processed.replace(/\n/g, '<br>')
+  processed = processed.replace(/(<\/(?:h[234]|blockquote|div)>)<br>/g, '$1')
 
   codeBlocks.forEach((block, idx) => {
     processed = processed.replace(`__CODE_BLOCK_${idx}__`, block)
@@ -1604,5 +1722,74 @@ function onSse(ev) {
   background: rgba(0, 113, 227, 0.08);
 }
 
+.clear-confirm-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+.clear-chat.is-confirm {
+  color: var(--danger) !important;
+  font-weight: 600;
+}
+.wiki-badge {
+  cursor: pointer;
+}
+.src.is-wiki-link {
+  color: var(--accent);
+  cursor: pointer;
+}
+.src.is-wiki-link:hover {
+  text-decoration: underline;
+}
+.md-h {
+  margin: 8px 0 4px;
+  font-weight: 650;
+  line-height: 1.35;
+}
+.md-quote {
+  margin: 6px 0;
+  padding: 4px 10px;
+  border-left: 3px solid var(--border-strong);
+  color: var(--text-secondary);
+}
+.md-li {
+  padding-left: 6px;
+  margin: 2px 0;
+}
+.wiki-save-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 260;
+  background: rgba(15, 23, 42, 0.42);
+  backdrop-filter: blur(3px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+.wiki-save-dialog {
+  width: min(420px, 94vw);
+  background: var(--surface, #ffffff);
+  border-radius: 14px;
+  border: 1px solid var(--border, #e5e5ea);
+  box-shadow: var(--shadow-lg);
+  padding: 20px;
+}
+.wiki-save-dialog h4 {
+  margin: 0 0 6px;
+  font-size: 16px;
+  font-weight: 650;
+}
+.wiki-save-sub {
+  margin: 0 0 14px;
+  font-size: 12.5px;
+  color: var(--text-secondary);
+}
+.wiki-save-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 14px;
+}
 </style>
 

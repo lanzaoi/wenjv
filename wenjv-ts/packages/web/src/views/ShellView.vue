@@ -40,7 +40,7 @@
     </header>
     <main class="main">
       <router-view v-slot="{ Component }">
-        <keep-alive :include="['ChatView']">
+        <keep-alive :include="['ChatView', 'LibraryView', 'WikiView']">
           <component :is="Component" />
         </keep-alive>
       </router-view>
@@ -157,5 +157,6 @@ function onLogout() {
 .main {
   flex: 1;
   min-height: 0;
+  overflow-y: auto;
 }
 </style>

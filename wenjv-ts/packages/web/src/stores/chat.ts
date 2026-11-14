@@ -33,6 +33,7 @@ export interface ChatState {
   modelsLoaded: boolean;
   prompt: string;
   tab: string;
+  selectedTags: string[];
   streaming: boolean;
   streamText: string;
   busy: boolean;
@@ -50,6 +51,7 @@ export const useChatStore = defineStore('chat', {
     modelsLoaded: false,
     prompt: '',
     tab: 'file',
+    selectedTags: [],
     streaming: false,
     streamText: '',
     busy: false,
@@ -122,6 +124,7 @@ export const useChatStore = defineStore('chat', {
       this.modelsLoaded = false;
       this.model = '';
       this.tab = 'file';
+      this.selectedTags = [];
       this.mode = 'rag';
       this.windowSize = 5;
     },

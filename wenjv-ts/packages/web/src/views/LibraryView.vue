@@ -37,37 +37,73 @@
       <span>{{ error }}</span>
     </div>
 
-    <!-- Top Tag Filter Bar -->
+    <!-- Top Filter & Search Bar -->
     <div class="tag-bar card">
-      <div class="tag-bar-left">
-        <div class="tag-bar-label">
-          <Icon name="tag" :size="14" />
-          <span>分类标签</span>
-        </div>
-        <div class="tag-pills">
+      <div class="tag-bar-top">
+        <div class="search-box">
+          <Icon name="search" :size="14" />
+          <input
+            v-model="searchQuery"
+            type="search"
+            class="lib-search-input"
+            placeholder="搜索标题、文件名、链接或标签…"
+          />
           <button
-            class="tag-pill"
-            :class="{ active: !activeTag }"
+            v-if="searchQuery"
             type="button"
-            @click="activeTag = null"
+            class="search-clear-btn"
+            aria-label="清除搜索"
+            @click="searchQuery = ''"
           >
-            全部 <span class="tag-count">{{ totalCount }}</span>
+            <Icon name="x" :size="12" />
           </button>
+        </div>
+        <div class="type-pills" role="tablist" aria-label="按类型筛选">
           <button
-            v-for="t in tagSummary"
-            :key="t.name"
-            class="tag-pill"
-            :class="{ active: activeTag === t.name }"
+            v-for="tp in typeFilters"
+            :key="tp.value"
             type="button"
-            @click="activeTag = activeTag === t.name ? null : t.name"
+            class="type-pill"
+            :class="{ active: activeType === tp.value }"
+            @click="activeType = tp.value"
           >
-            #{{ t.name }} <span class="tag-count">{{ t.count }}</span>
+            {{ tp.label }}
+            <span class="tag-count">{{ tp.value === 'all' ? totalCount : byType(tp.value).length }}</span>
           </button>
         </div>
       </div>
-      <div class="tag-bar-right">
-        <span v-if="tagActionMessage" class="backfill-msg">{{ tagActionMessage }}</span>
-        <span class="muted" style="font-size: 12px">点击标签可按类筛选</span>
+
+      <div class="tag-bar-bottom">
+        <div class="tag-bar-left">
+          <div class="tag-bar-label">
+            <Icon name="tag" :size="14" />
+            <span>分类标签</span>
+          </div>
+          <div class="tag-pills">
+            <button
+              class="tag-pill"
+              :class="{ active: !activeTag }"
+              type="button"
+              @click="activeTag = null"
+            >
+              全部 <span class="tag-count">{{ totalCount }}</span>
+            </button>
+            <button
+              v-for="t in tagSummary"
+              :key="t.name"
+              class="tag-pill"
+              :class="{ active: activeTag === t.name }"
+              type="button"
+              @click="activeTag = activeTag === t.name ? null : t.name"
+            >
+              #{{ t.name }} <span class="tag-count">{{ t.count }}</span>
+            </button>
+          </div>
+        </div>
+        <div class="tag-bar-right">
+          <span v-if="tagActionMessage" class="backfill-msg">{{ tagActionMessage }}</span>
+          <span class="muted" style="font-size: 12px">切换页签自动保留筛选与进度</span>
+        </div>
       </div>
     </div>
 
@@ -81,7 +117,7 @@
     </div>
 
     <div v-else class="grid">
-      <section v-for="sec in sections" :key="sec.type" class="card panel">
+      <section v-for="sec in visibleSections" :key="sec.type" class="card panel">
         <div class="panel-h">
           <div class="panel-title">
             <Icon :name="sec.icon" :size="16" />
@@ -91,10 +127,15 @@
         </div>
         <div v-if="!filteredByType(sec.type).length" class="empty muted">
           <div class="empty-glyph"><Icon :name="sec.rowIcon" :size="20" /></div>
-          {{ activeTag ? `无带有 #${activeTag} 的${sec.label}` : `暂无${sec.label}` }}
+          {{ activeTag || searchQuery ? `未找到匹配的${sec.label}` : `暂无${sec.label}` }}
         </div>
         <ul v-else>
-          <li v-for="item in filteredByType(sec.type)" :key="item.id">
+          <li
+            v-for="item in filteredByType(sec.type)"
+            :key="item.id"
+            class="resource-row"
+            @click="openDetail(item)"
+          >
             <div class="row-ico"><Icon :name="sec.rowIcon" :size="16" /></div>
             <div class="row-body">
               <div class="row-main">
@@ -104,7 +145,7 @@
                   <button
                     class="tag-edit-btn"
                     title="删除资源"
-                    @click.stop="removeResource(item)"
+                    @click.stop="askDeleteResource(item)"
                   >
                     <Icon name="x" :size="12" />
                   </button>
@@ -112,6 +153,9 @@
               </div>
               <div class="muted meta" :class="{ mono: sec.type === 'link' }">
                 {{ sec.type === 'link' ? item.source_url : (item.filename || formatDate(item.created_at)) }}
+              </div>
+              <div v-if="item.status === 'failed' && item.error_message" class="item-err-line" :title="item.error_message">
+                失败原因：{{ item.error_message }}
               </div>
 
               <div v-if="editingKey === item.id" class="inline-tag-edit" @click.stop>
@@ -149,22 +193,81 @@
         </ul>
       </section>
     </div>
+
+    <!-- Resource Detail Modal -->
+    <Teleport to="body">
+      <div v-if="selectedResource" class="lib-modal-backdrop" @click.self="closeDetail">
+        <div class="lib-detail-dialog" role="dialog" aria-modal="true" aria-label="资源详情">
+          <header class="detail-head">
+            <div class="detail-title-wrap">
+              <h4>{{ selectedResource.title || selectedResource.filename || selectedResource.source_url }}</h4>
+              <StatusDot :status="selectedResource.status || '-'" />
+            </div>
+            <button type="button" class="detail-close" aria-label="关闭" @click="closeDetail">×</button>
+          </header>
+          <div class="detail-body">
+            <div class="detail-kv"><span>类型</span><strong>{{ selectedResource.type }}</strong></div>
+            <div class="detail-kv"><span>创建时间</span><strong>{{ formatDate(selectedResource.created_at) }}</strong></div>
+            <div v-if="selectedResource.filename" class="detail-kv">
+              <span>文件名</span><code class="mono">{{ selectedResource.filename }}</code>
+            </div>
+            <div v-if="selectedResource.source_url" class="detail-kv">
+              <span>来源链接</span>
+              <a :href="selectedResource.source_url" target="_blank" rel="noopener noreferrer" class="mono">
+                {{ selectedResource.source_url }}
+              </a>
+            </div>
+            <div v-if="selectedResource.error_message" class="detail-err-box">
+              <strong>错误详情：</strong>{{ selectedResource.error_message }}
+            </div>
+            <div class="detail-kv">
+              <span>标签</span>
+              <div class="item-tags" style="margin-top: 0">
+                <span v-for="t in selectedResource.tags || []" :key="t" class="tag-badge">#{{ t }}</span>
+                <span v-if="!selectedResource.tags?.length" class="muted" style="font-size: 12px">无标签</span>
+              </div>
+            </div>
+          </div>
+          <footer class="detail-foot">
+            <button type="button" class="btn btn-secondary btn-sm" @click="askDeleteResource(selectedResource)">
+              删除资源
+            </button>
+            <button type="button" class="btn btn-primary btn-sm" @click="closeDetail">关闭</button>
+          </footer>
+        </div>
+      </div>
+
+      <!-- Non-blocking Delete Confirm Dialog -->
+      <div v-if="pendingDeleteItem" class="lib-modal-backdrop" @click.self="pendingDeleteItem = null">
+        <div class="lib-confirm-dialog" role="dialog" aria-modal="true">
+          <h4>删除资源</h4>
+          <p>
+            确定删除 <strong>{{ pendingDeleteItem.title || pendingDeleteItem.filename || pendingDeleteItem.source_url }}</strong>？该操作会同步移除对应分块与索引，不可恢复。
+          </p>
+          <div class="detail-foot">
+            <button type="button" class="btn btn-secondary btn-sm" :disabled="deleting" @click="pendingDeleteItem = null">
+              取消
+            </button>
+            <button type="button" class="btn btn-danger-solid btn-sm" :disabled="deleting" @click="confirmDeleteResource">
+              {{ deleting ? '删除中…' : '确认删除' }}
+            </button>
+          </div>
+        </div>
+      </div>
+    </Teleport>
   </div>
 </template>
 
 <script setup>
-import { ref, onMounted, onBeforeUnmount, computed, nextTick } from 'vue'
+import { ref, onMounted, onActivated, onDeactivated, onBeforeUnmount, computed, nextTick } from 'vue'
+import { storeToRefs } from 'pinia'
 import { useRouter } from 'vue-router'
-import { useAuthStore } from '../stores/auth'
-import {
-  listResources,
-  deleteResource,
-  getTags,
-  updateResourceTags,
-} from '../api/client'
+import { useLibraryStore } from '../stores/library'
 import Icon from '../components/Icon.vue'
 import StatusDot from '../components/StatusDot.vue'
 import ImportModal from '../components/ImportModal.vue'
+
+defineOptions({ name: 'LibraryView' })
 
 const sections = [
   { type: 'file', label: '文件', icon: 'file', rowIcon: 'file' },
@@ -172,35 +275,73 @@ const sections = [
   { type: 'link', label: '链接', icon: 'globe', rowIcon: 'link' },
 ]
 
-const router = useRouter()
-const auth = useAuthStore()
-const loading = ref(false)
-const error = ref('')
-const resources = ref([])
-const totalCount = ref(0)
-const tagSummary = ref([])
-const activeTag = ref(null)
-const tagActionMessage = ref('')
+const typeFilters = [
+  { value: 'all', label: '全部' },
+  { value: 'file', label: '文件' },
+  { value: 'note', label: '笔记' },
+  { value: 'link', label: '链接' },
+]
 
+const router = useRouter()
+const library = useLibraryStore()
+const {
+  loading,
+  error,
+  resources,
+  totalCount,
+  tagSummary,
+  activeTag,
+  activeType,
+  searchQuery,
+  selectedResource,
+} = storeToRefs(library)
+
+const tagActionMessage = ref('')
 const showImportModal = ref(false)
 const importTab = ref('batch')
 let pollTimer = null
+let isViewActive = true
 
 const editingKey = ref(null)
 const editingInput = ref('')
 const savingTags = ref(false)
 const tagInputRef = ref(null)
 
+const pendingDeleteItem = ref(null)
+const deleting = ref(false)
+
 const hasAny = computed(() => resources.value.length > 0)
+const visibleSections = computed(() => {
+  if (activeType.value === 'all') return sections
+  return sections.filter((s) => s.type === activeType.value)
+})
 
 function byType(type) {
   return resources.value.filter((r) => r.type === type)
 }
 
 function filteredByType(type) {
-  const list = byType(type)
-  if (!activeTag.value) return list
-  return list.filter((item) => (item.tags || []).includes(activeTag.value))
+  let list = byType(type)
+  if (activeTag.value) {
+    list = list.filter((item) => (item.tags || []).includes(activeTag.value))
+  }
+  const q = searchQuery.value.trim().toLowerCase()
+  if (q) {
+    list = list.filter((item) => {
+      const hay = [
+        item.title,
+        item.filename,
+        item.original_filename,
+        item.source_url,
+        ...(item.tags || []),
+      ]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase()
+      return hay.includes(q)
+    })
+  }
+  return list
 }
 
 function startEdit(item) {
@@ -230,26 +371,37 @@ async function saveTags(item) {
       .split(/[,，\s]+/)
       .map((s) => s.trim().replace(/^#+/, ''))
       .filter(Boolean)
-    const res = await updateResourceTags(auth.token, 'resource', item.id, rawList)
-    item.tags = res.tags || []
+    await library.saveItemTags(item.id, rawList)
     cancelEdit()
-    await refreshTags()
   } catch (err) {
-    error.value = '更新标签失败: ' + err.message
+    library.error = '更新标签失败: ' + (err?.message || err)
   } finally {
     savingTags.value = false
   }
 }
 
-async function removeResource(item) {
-  if (!window.confirm(`确定删除 "${item.title || item.filename || item.source_url}"？`)) return
+function openDetail(item) {
+  library.selectedResourceId = item.id
+}
+
+function closeDetail() {
+  library.selectedResourceId = null
+}
+
+function askDeleteResource(item) {
+  pendingDeleteItem.value = item
+}
+
+async function confirmDeleteResource() {
+  if (!pendingDeleteItem.value || deleting.value) return
+  deleting.value = true
   try {
-    await deleteResource(auth.token, item.id)
-    resources.value = resources.value.filter((r) => r.id !== item.id)
-    totalCount.value = resources.value.length
-    await refreshTags()
+    await library.removeItem(pendingDeleteItem.value.id)
+    pendingDeleteItem.value = null
   } catch (err) {
-    error.value = '删除资源失败: ' + err.message
+    library.error = '删除资源失败: ' + (err?.message || err)
+  } finally {
+    deleting.value = false
   }
 }
 
@@ -261,15 +413,6 @@ function formatDate(v) {
     return d.toLocaleString()
   } catch {
     return String(v)
-  }
-}
-
-async function refreshTags() {
-  try {
-    const res = await getTags(auth.token)
-    tagSummary.value = res.tags || []
-  } catch {
-    // ignore tag refresh error
   }
 }
 
@@ -287,13 +430,16 @@ async function handleImported() {
   await reload()
 }
 
-function schedulePollIfPending() {
+function clearPollTimer() {
   if (pollTimer) {
     clearTimeout(pollTimer)
     pollTimer = null
   }
-  const hasActiveJobs = resources.value.some((r) => r.status === 'pending' || r.status === 'processing')
-  if (hasActiveJobs) {
+}
+
+function schedulePollIfPending() {
+  clearPollTimer()
+  if (isViewActive && library.hasActiveJobs) {
     pollTimer = setTimeout(() => {
       void reload({ silent: true })
     }, 2500)
@@ -301,25 +447,28 @@ function schedulePollIfPending() {
 }
 
 async function reload(opts = {}) {
-  const silent = Boolean(opts && opts.silent)
-  if (!silent) loading.value = true
-  error.value = ''
-  try {
-    const res = await listResources(auth.token, { limit: 200 })
-    resources.value = res?.resources || []
-    totalCount.value = res?.total ?? resources.value.length
-    await refreshTags()
-    schedulePollIfPending()
-  } catch (e) {
-    error.value = e.message
-  } finally {
-    if (!silent) loading.value = false
-  }
+  await library.reload(opts)
+  schedulePollIfPending()
 }
 
-onMounted(() => reload())
+onMounted(() => {
+  isViewActive = true
+  void reload({ silent: library.loaded })
+})
+
+onActivated(() => {
+  isViewActive = true
+  void reload({ silent: true })
+})
+
+onDeactivated(() => {
+  isViewActive = false
+  clearPollTimer()
+})
+
 onBeforeUnmount(() => {
-  if (pollTimer) clearTimeout(pollTimer)
+  isViewActive = false
+  clearPollTimer()
 })
 </script>
 
@@ -381,12 +530,80 @@ onBeforeUnmount(() => {
 /* Tag Bar */
 .tag-bar {
   display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px;
+  margin-bottom: 18px;
+}
+.tag-bar-top {
+  display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
-  padding: 10px 14px;
-  margin-bottom: 18px;
+  gap: 12px;
   flex-wrap: wrap;
+}
+.search-box {
+  flex: 1;
+  min-width: 220px;
+  max-width: 420px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 10px;
+  border-radius: 9px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text-secondary);
+}
+.lib-search-input {
+  flex: 1;
+  border: none;
+  background: transparent;
+  outline: none;
+  font-size: 13px;
+  color: var(--text);
+  min-width: 0;
+}
+.search-clear-btn {
+  border: none;
+  background: transparent;
+  padding: 2px;
+  color: var(--text-tertiary);
+  display: inline-flex;
+  align-items: center;
+}
+.type-pills {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.type-pill {
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-secondary);
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 500;
+  padding: 4px 10px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.type-pill.active {
+  background: var(--accent-soft);
+  border-color: rgba(0, 113, 227, 0.35);
+  color: var(--accent);
+  font-weight: 600;
+}
+.tag-bar-bottom {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
 }
 .tag-bar-left {
   display: flex;
@@ -631,5 +848,106 @@ li:hover {
 .skel-panel {
   padding: 18px;
   min-height: 180px;
+}
+.resource-row {
+  cursor: pointer;
+}
+.item-err-line {
+  margin-top: 4px;
+  font-size: 11.5px;
+  color: var(--danger);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.lib-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 250;
+  background: rgba(15, 23, 42, 0.42);
+  backdrop-filter: blur(3px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+.lib-detail-dialog,
+.lib-confirm-dialog {
+  width: min(480px, 94vw);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  box-shadow: var(--shadow-lg);
+  padding: 18px 20px;
+}
+.lib-confirm-dialog p {
+  margin: 8px 0 16px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.55;
+}
+.detail-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+}
+.detail-title-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.detail-title-wrap h4,
+.lib-confirm-dialog h4 {
+  margin: 0;
+  font-size: 15.5px;
+  font-weight: 650;
+  word-break: break-word;
+}
+.detail-close {
+  border: none;
+  background: transparent;
+  font-size: 20px;
+  color: var(--text-secondary);
+  line-height: 1;
+}
+.detail-body {
+  padding: 14px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.detail-kv {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 13px;
+}
+.detail-kv > span {
+  font-size: 11.5px;
+  color: var(--text-tertiary);
+}
+.detail-err-box {
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: #fff5f5;
+  border: 1px solid rgba(255, 59, 48, 0.25);
+  color: #b91c1c;
+  font-size: 12.5px;
+  word-break: break-word;
+}
+.detail-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+.btn-danger-solid {
+  background: var(--danger);
+  color: #fff;
 }
 </style>

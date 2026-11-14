@@ -1,10 +1,12 @@
 import { defineStore } from 'pinia';
-import { login as apiLogin, register as apiRegister, validateToken } from '../api/client.js';
+import { login as apiLogin, register as apiRegister, validateToken, type ApiError } from '../api/client.js';
 import { useChatStore } from './chat.js';
+import { useLibraryStore } from './library.js';
+import { useWikiStore } from './wiki.js';
 
 const STORAGE_KEY = 'wenjv_auth_token';
 const LEGACY_STORAGE_KEYS = ['wenjv_auth', 'kb_auth'];
-const VALIDATION_CACHE_TTL_MS = 60 * 1000;
+const VALIDATION_CACHE_TTL_MS = 5 * 60 * 1000;
 
 export interface AuthState {
   token: string | null;
@@ -71,8 +73,18 @@ export const useAuthStore = defineStore('auth', {
           this.lastValidatedAt = now;
           return true;
         }
-      } catch {
-        /* fallthrough */
+        if (r && r.valid === false) {
+          this.logout();
+          return false;
+        }
+      } catch (err: unknown) {
+        const apiErr = err as ApiError;
+        if (apiErr?.status === 401 || apiErr?.status === 403) {
+          this.logout();
+          return false;
+        }
+        // Keep hydrated session on transient network/5xx glitches instead of wiping tabs
+        return true;
       }
       this.logout();
       return false;
@@ -101,6 +113,8 @@ export const useAuthStore = defineStore('auth', {
       this.persist();
       try {
         useChatStore().clearAll();
+        useLibraryStore().clearAll();
+        useWikiStore().clearAll();
       } catch {
         /* pinia not ready */
       }

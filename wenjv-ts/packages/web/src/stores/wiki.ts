@@ -317,5 +317,19 @@ export const useWikiStore = defineStore('wiki', {
       await this.loadTree();
       return res;
     },
+
+    clearAll() {
+      this.clearTimer();
+      this.tree = [];
+      this.currentPage = null;
+      this.loadingTree = false;
+      this.loadingPage = false;
+      this.saving = false;
+      this.dirty = false;
+      this.saveError = null;
+      this.conflictDetected = false;
+      this.lastSavedAt = null;
+      this.pendingSave = null;
+    },
   },
 });

@@ -140,8 +140,7 @@ export function initTables(db: Database.Database): void {
       FOREIGN KEY(target_page_id) REFERENCES wiki_pages (id) ON DELETE CASCADE
     );
 
-    CREATE UNIQUE INDEX IF NOT EXISTS uq_wiki_link_nonnull
-      ON wiki_links(user_id, source_page_id, target_title, COALESCE(alias, ''), COALESCE(section_anchor, ''), link_type);
+    CREATE INDEX IF NOT EXISTS idx_wiki_links_target ON wiki_links(target_page_id);
 
     CREATE TABLE IF NOT EXISTS wiki_revisions (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -273,4 +272,10 @@ export function initTables(db: Database.Database): void {
   `);
 
   createFts5Table(db);
+
+  // Track schema version for future incremental migrations.
+  const currentVersion = Number(db.pragma('user_version', { simple: true }) || 0);
+  if (currentVersion < 2) {
+    db.pragma('user_version = 2');
+  }
 }

@@ -164,8 +164,17 @@ describe('Unified Links, SSRF, Admin & Health Routes (Schema v2)', () => {
       VALUES ('<script>alert(1)</script>', 12.5, 1, 2, 0, 3, 0, '<img onerror=x>')
     `).run();
 
-    const adminHtmlResp = await env.app.request(`/admin?token=${adminToken}`);
+    // Query token is disabled on /admin SSR HTML; Bearer Header auth is required
+    const queryTokenHtml = await env.app.request(`/admin?token=${adminToken}`);
+    expect(queryTokenHtml.status).toBe(401);
+
+    const adminHtmlResp = await env.app.request('/admin', {
+      headers: { Authorization: `Bearer ${adminToken}` },
+    });
     expect(adminHtmlResp.status).toBe(200);
+    expect(adminHtmlResp.headers.get('x-content-type-options')).toBe('nosniff');
+    expect(adminHtmlResp.headers.get('referrer-policy')).toBe('no-referrer');
+    expect(adminHtmlResp.headers.get('content-security-policy')).toContain("default-src 'self'");
     const htmlBody = await adminHtmlResp.text();
     expect(htmlBody).not.toContain('<script>alert(1)</script>');
     expect(htmlBody).toContain('&lt;script&gt;alert(1)&lt;/script&gt;');

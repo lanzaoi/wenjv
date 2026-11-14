@@ -40,6 +40,7 @@ jobs:
           test/auth.test.ts
           test/config.test.ts
           test/markdown-web.test.ts
+          test/security-hardening.test.ts
           test/chat.test.ts
           test/wiki.test.ts
           test/links-and-admin.test.ts

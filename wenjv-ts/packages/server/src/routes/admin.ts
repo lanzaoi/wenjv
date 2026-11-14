@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import { getDb } from '../db/index.js';
-import { authMiddleware, resolveBearerOrQueryUser, type AuthUser } from '../auth/middleware.js';
+import { authMiddleware, type AuthUser } from '../auth/middleware.js';
 import { getOcrClient } from '../ai/ocr-client.js';
 import { getSigLIP2 } from '../ai/siglip2.js';
 
@@ -162,12 +162,9 @@ adminRouter.post('/reset-counts', authMiddleware, (c) => {
   return c.json({ message: 'API call counts reset successfully' });
 });
 
-// GET /admin (Protected SSR Dashboard HTML with XSS escaping)
-adminRouter.get('/', async (c) => {
-  const user = await resolveBearerOrQueryUser(c);
-  if (!user) {
-    return c.json({ detail: 'Unauthorized' }, 401);
-  }
+// GET /admin (Protected SSR Dashboard HTML — Bearer header auth only, query token rejected)
+adminRouter.get('/', authMiddleware, async (c) => {
+  const user = c.get('user') as AuthUser;
   if (!user.is_superuser) {
     return c.json({ detail: 'Superuser privileges required' }, 403);
   }

@@ -370,13 +370,17 @@ export function createWikiPage(params: CreateWikiPageParams): WikiPageRecord {
   const slug = params.deduplicateSlug ? ensureUniqueSlug(params.userId, baseSlug) : baseSlug;
 
   let parentPath = '/';
-  if (params.parentId) {
-    const parent = db.prepare('SELECT path FROM wiki_pages WHERE id = ? AND user_id = ?').get(params.parentId, params.userId) as
-      | { path: string }
-      | undefined;
-    if (parent) {
-      parentPath = parent.path;
+  if (params.parentId !== undefined && params.parentId !== null) {
+    if (!Number.isSafeInteger(params.parentId) || params.parentId <= 0) {
+      throw new ValidationError('Invalid parent_id');
     }
+    const parent = db
+      .prepare('SELECT id, path FROM wiki_pages WHERE id = ? AND user_id = ?')
+      .get(params.parentId, params.userId) as { id: number; path: string } | undefined;
+    if (!parent) {
+      throw new NotFoundError(`Parent page ${params.parentId} not found`);
+    }
+    parentPath = parent.path;
   }
 
   const res = db

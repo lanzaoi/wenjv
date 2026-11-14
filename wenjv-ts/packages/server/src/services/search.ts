@@ -40,7 +40,22 @@ export interface SearchOptions {
   tags?: string[] | undefined;
 }
 
-export function computeQueryHash(options: SearchOptions): string {
+function getUserContentWatermark(db: ReturnType<typeof getDb>, userId?: number): string {
+  if (!userId) return 'anon';
+  try {
+    const rRow = db
+      .prepare('SELECT COUNT(*) as cnt, MAX(updated_at) as ts FROM resources WHERE user_id = ?')
+      .get(userId) as { cnt: number; ts: string | null } | undefined;
+    const wRow = db
+      .prepare('SELECT COUNT(*) as cnt, MAX(updated_at) as ts FROM wiki_pages WHERE user_id = ?')
+      .get(userId) as { cnt: number; ts: string | null } | undefined;
+    return `${rRow?.cnt || 0}:${rRow?.ts || ''}|${wRow?.cnt || 0}:${wRow?.ts || ''}`;
+  } catch {
+    return '0';
+  }
+}
+
+export function computeQueryHash(options: SearchOptions, contentWatermark = ''): string {
   const normPrompt = (options.prompt || '').toLowerCase().trim().replace(/\s+/g, ' ');
   const data = {
     p: normPrompt,
@@ -49,6 +64,7 @@ export function computeQueryHash(options: SearchOptions): string {
     st: options.sourceType || null,
     w: options.windowSize || 5,
     tg: options.tags ? [...options.tags].sort() : null,
+    wm: contentWatermark,
   };
   return crypto.createHash('sha256').update(JSON.stringify(data)).digest('hex').slice(0, 32);
 }
@@ -60,8 +76,9 @@ export async function searchDocuments(options: SearchOptions): Promise<SearchHit
   const prompt = options.prompt || '';
   const userId = options.userId;
 
-  // 1. Check query cache
-  const queryHash = computeQueryHash(options);
+  // 1. Check query cache (content-watermark aware)
+  const watermark = getUserContentWatermark(db, userId);
+  const queryHash = computeQueryHash(options, watermark);
   if (userId) {
     const cachedRow = db
       .prepare('SELECT result_json, expires_at FROM query_result_cache WHERE query_hash = ? AND user_id = ?')
@@ -221,8 +238,9 @@ export async function searchDocuments(options: SearchOptions): Promise<SearchHit
         }
       }
       fusedHits = rerankedList;
-    } catch {
+    } catch (err) {
       // fail-open on reranker error: keep RRF order
+      console.warn('[Search] Reranker failed, falling back to RRF order:', err instanceof Error ? err.message : String(err));
     }
   }
 
@@ -234,19 +252,21 @@ export async function searchDocuments(options: SearchOptions): Promise<SearchHit
       INSERT INTO query_logs("query", latency_ms, v_hits, fts5_hits, s_hits, total_hits, cache_hit, error)
       VALUES (?, ?, ?, ?, 0, ?, 0, NULL)
     `).run(prompt, latencyMs, vectorRows.length, ftsRows.length, finalHits.length);
-  } catch {
-    // ignore
+  } catch (err) {
+    console.warn('[Search] Query log insert failed:', err instanceof Error ? err.message : String(err));
   }
 
   if (userId && finalHits.length > 0) {
     try {
+      const nowIso = new Date().toISOString();
       const expiresAt = new Date(Date.now() + 300 * 1000).toISOString();
+      db.prepare('DELETE FROM query_result_cache WHERE expires_at <= ?').run(nowIso);
       db.prepare(`
         INSERT OR REPLACE INTO query_result_cache(query_hash, user_id, result_json, expires_at)
         VALUES (?, ?, ?, ?)
       `).run(queryHash, userId, JSON.stringify(finalHits), expiresAt);
-    } catch {
-      // ignore
+    } catch (err) {
+      console.warn('[Search] Cache write failed:', err instanceof Error ? err.message : String(err));
     }
   }
 

@@ -173,7 +173,8 @@ export function matchFts5(
 
     try {
       rows = db.prepare(sql).all(...params) as FtsMatchRow[];
-    } catch {
+    } catch (err) {
+      console.warn('[FTS5] Match query failed:', err instanceof Error ? err.message : String(err));
       rows = [];
     }
   }

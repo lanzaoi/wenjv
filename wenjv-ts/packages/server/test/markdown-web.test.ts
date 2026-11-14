@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { renderMarkdown } from '../../web/src/utils/markdown.js';
+import { renderMd } from '../../web/src/utils/chat-format.js';
 
 describe('Web Markdown Rendering Security & Escaping (BUG-07)', () => {
   it('avoids double HTML escaping in wikilinks and visual embeds', () => {
@@ -32,5 +33,22 @@ describe('Web Markdown Rendering Security & Escaping (BUG-07)', () => {
     expect(html).toContain('src="/api/assets/image?path=mm_assets%2F5%2Fpic.jpg&token=jwt-abc-123"');
     expect(html).toContain('class="wiki-link-btn" data-wiki-target="Existing"');
     expect(html).toContain('class="wiki-link-btn is-missing" data-wiki-target="GhostPage"');
+  });
+
+  it('prevents double-quote attribute breakout and HTML injection in chat renderMd (H2)', () => {
+    const payload = [
+      'Try [click](https://a.com/"onfocus="alert(1))',
+      'Bad [js](javascript:alert(1))',
+      '<script>alert(1)</script>',
+      '<img src=x onerror=alert(1)>',
+    ].join('\n');
+
+    const html = renderMd(payload);
+    expect(html).not.toContain('"onfocus=');
+    expect(html).toContain('&quot;onfocus=');
+    expect(html).not.toContain('href="javascript:');
+    expect(html).not.toContain('<script>');
+    expect(html).not.toContain('<img ');
+    expect(html).toContain('&lt;script&gt;');
   });
 });

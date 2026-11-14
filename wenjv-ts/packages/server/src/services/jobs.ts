@@ -172,30 +172,35 @@ function markEntityFinished(entityType: ChunkEntityType, entityId: number): void
 export function claimNextJob(): IngestionJobRecord | null {
   const db = getDb();
   const preferredTypes: ChunkEntityType[] = ['wiki', 'resource'];
-  let candidate: IngestionJobRecord | undefined;
 
-  for (const entityType of preferredTypes) {
-    candidate = db
-      .prepare('SELECT * FROM ingestion_jobs WHERE status = ? AND entity_type = ? ORDER BY id ASC LIMIT 1')
-      .get('pending', entityType) as IngestionJobRecord | undefined;
-    if (candidate) break;
-  }
+  const claimTx = db.transaction(() => {
+    let candidate: IngestionJobRecord | undefined;
 
-  if (!candidate) return null;
+    for (const entityType of preferredTypes) {
+      candidate = db
+        .prepare('SELECT * FROM ingestion_jobs WHERE status = ? AND entity_type = ? ORDER BY id ASC LIMIT 1')
+        .get('pending', entityType) as IngestionJobRecord | undefined;
+      if (candidate) break;
+    }
 
-  markEntityInProgress(candidate.entity_type, candidate.entity_id);
+    if (!candidate) return null;
 
-  db.prepare(`
-    UPDATE ingestion_jobs
-    SET status = 'running',
-        attempts = attempts + 1,
-        started_at = CURRENT_TIMESTAMP,
-        updated_at = CURRENT_TIMESTAMP,
-        last_error = NULL
-    WHERE id = ?
-  `).run(candidate.id);
+    markEntityInProgress(candidate.entity_type, candidate.entity_id);
 
-  return db.prepare('SELECT * FROM ingestion_jobs WHERE id = ?').get(candidate.id) as IngestionJobRecord;
+    db.prepare(`
+      UPDATE ingestion_jobs
+      SET status = 'running',
+          attempts = attempts + 1,
+          started_at = CURRENT_TIMESTAMP,
+          updated_at = CURRENT_TIMESTAMP,
+          last_error = NULL
+      WHERE id = ?
+    `).run(candidate.id);
+
+    return db.prepare('SELECT * FROM ingestion_jobs WHERE id = ?').get(candidate.id) as IngestionJobRecord;
+  });
+
+  return claimTx();
 }
 
 export function reclaimStaleJobs(): number {
@@ -414,7 +419,13 @@ export async function executeJob(job: IngestionJobRecord): Promise<void> {
             chunk.indexing_text,
             chunk.header_str
           );
-          const vec = vectors[i] || new Array(1024).fill(0);
+          let vec = vectors[i];
+          if (!vec) {
+            console.warn(
+              `[Jobs] Missing embedding vector for ${job.entity_type}:${job.entity_id} chunk #${i}; writing zero vector fallback`
+            );
+            vec = new Array(1024).fill(0);
+          }
 
           chunkRows.push({
             id: chunkId,
@@ -480,6 +491,36 @@ export async function executeJob(job: IngestionJobRecord): Promise<void> {
 }
 
 let _runnerRunning = false;
+let _pollTimer: ReturnType<typeof setTimeout> | null = null;
+const _activeJobs = new Set<Promise<void>>();
+
+function pumpJobWorkers(): void {
+  if (!_runnerRunning) return;
+  const concurrency = Math.max(1, config.JOB_WORKER_CONCURRENCY || 1);
+
+  while (_runnerRunning && _activeJobs.size < concurrency) {
+    let job: IngestionJobRecord | null = null;
+    try {
+      job = claimNextJob();
+    } catch {
+      job = null;
+    }
+    if (!job) break;
+
+    const claimed = job;
+    const workerPromise = executeJob(claimed)
+      .catch(() => {
+        // job retry/failure state is already persisted inside executeJob
+      })
+      .finally(() => {
+        _activeJobs.delete(workerPromise);
+        if (_runnerRunning) {
+          queueMicrotask(pumpJobWorkers);
+        }
+      });
+    _activeJobs.add(workerPromise);
+  }
+}
 
 export function startJobRunner(): void {
   if (_runnerRunning) return;
@@ -487,23 +528,21 @@ export function startJobRunner(): void {
 
   reclaimStaleJobs();
 
-  const tick = async () => {
+  const scheduleNext = (delayMs: number) => {
     if (!_runnerRunning) return;
-    try {
-      const job = claimNextJob();
-      if (job) {
-        await executeJob(job);
-      }
-    } catch {
-      // ignore background tick error; job retry state already recorded
-    } finally {
-      setTimeout(tick, config.JOB_POLL_INTERVAL_SECONDS * 1000);
-    }
+    _pollTimer = setTimeout(() => {
+      pumpJobWorkers();
+      scheduleNext(config.JOB_POLL_INTERVAL_SECONDS * 1000);
+    }, delayMs);
   };
 
-  setTimeout(tick, 500);
+  scheduleNext(500);
 }
 
 export function stopJobRunner(): void {
   _runnerRunning = false;
+  if (_pollTimer) {
+    clearTimeout(_pollTimer);
+    _pollTimer = null;
+  }
 }

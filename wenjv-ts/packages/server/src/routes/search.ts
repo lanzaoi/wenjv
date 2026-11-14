@@ -6,6 +6,7 @@ import { searchDocuments } from '../services/search.js';
 import { getAssetsByIds } from '../services/assets.js';
 import { SigLIP2Engine } from '../ai/siglip2.js';
 import { getVisualStore } from '../vector/visual-store.js';
+import { config } from '../config.js';
 
 export const searchRouter = new Hono();
 
@@ -53,8 +54,14 @@ searchRouter.post('/by-image', authMiddleware, async (c) => {
   if (!file || !(file instanceof File)) {
     return c.json({ detail: 'Image file required' }, 400);
   }
+  if (file.size > config.MAX_UPLOAD_BYTES) {
+    return c.json({ detail: `Image size exceeds limit of ${config.MAX_UPLOAD_BYTES} bytes` }, 413);
+  }
 
   const buffer = Buffer.from(await file.arrayBuffer());
+  if (buffer.length > config.MAX_UPLOAD_BYTES) {
+    return c.json({ detail: `Image size exceeds limit of ${config.MAX_UPLOAD_BYTES} bytes` }, 413);
+  }
   const prompt = typeof body['prompt'] === 'string' ? body['prompt'] : undefined;
   const windowSize = body['window_size'] ? parseInt(String(body['window_size']), 10) : 5;
   const sourceType = parseResourceType(body['type'] ?? body['source_type']);

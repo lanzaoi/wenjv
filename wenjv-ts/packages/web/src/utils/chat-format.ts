@@ -7,7 +7,8 @@ export function renderMd(text: string): string {
     const escCode = String(code)
       .replace(/&/g, '&amp;')
       .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;');
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
     codeBlocks.push(`<pre class="code-block"><code class="language-${lang || 'text'}">${escCode}</code></pre>`);
     return id;
   });
@@ -15,7 +16,9 @@ export function renderMd(text: string): string {
   processed = processed
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 
   processed = processed.replace(/^### (.+)$/gm, '<h4 class="md-h">$1</h4>');
   processed = processed.replace(/^## (.+)$/gm, '<h3 class="md-h">$1</h3>');

@@ -5,6 +5,7 @@ import { getDb, closeDb } from '../src/db/index.js';
 import { loadConfig } from '../src/config.js';
 import { resetTextStore } from '../src/vector/text-store.js';
 import { resetVisualStore } from '../src/vector/visual-store.js';
+import { clearAuthRateLimits } from '../src/routes/auth.js';
 import { createApp } from '../src/main.js';
 import type { Hono } from 'hono';
 
@@ -41,6 +42,7 @@ export function setupTestEnv(): TestEnv {
   const app = createApp();
 
   const cleanup = () => {
+    clearAuthRateLimits();
     closeDb();
     resetTextStore();
     resetVisualStore();

@@ -1,10 +1,56 @@
-import { Hono } from 'hono';
+import { Hono, type Context } from 'hono';
 import { getDb } from '../db/index.js';
 import { verifyPassword, hashPassword } from '../auth/password.js';
 import { createAccessToken, verifyAccessToken } from '../auth/jwt.js';
 import { authMiddleware, type AuthUser } from '../auth/middleware.js';
 
 export const authRouter = new Hono();
+
+const LOGIN_WINDOW_MS = 60_000;
+const MAX_LOGIN_FAILURES = 5;
+const REGISTER_WINDOW_MS = 600_000;
+const MAX_REGISTERS_PER_WINDOW = 30;
+
+const loginFailures = new Map<string, number[]>();
+const registerAttempts = new Map<string, number[]>();
+
+function getClientIp(c: Context): string {
+  const xff = c.req.header('x-forwarded-for');
+  if (xff) {
+    return xff.split(',')[0]?.trim() || 'unknown';
+  }
+  return c.req.header('x-real-ip')?.trim() || 'local';
+}
+
+function pruneTimestamps(map: Map<string, number[]>, key: string, windowMs: number, now = Date.now()): number[] {
+  const arr = map.get(key);
+  if (!arr || arr.length === 0) return [];
+  const valid = arr.filter((ts) => now - ts < windowMs);
+  if (valid.length === 0) {
+    map.delete(key);
+  } else {
+    map.set(key, valid);
+  }
+  return valid;
+}
+
+function recordAttempt(map: Map<string, number[]>, key: string, windowMs: number): void {
+  const now = Date.now();
+  if (map.size > 2000) {
+    for (const k of map.keys()) {
+      pruneTimestamps(map, k, windowMs, now);
+    }
+  }
+  const valid = pruneTimestamps(map, key, windowMs, now);
+  valid.push(now);
+  map.set(key, valid);
+}
+
+/** Reset in-memory auth rate limit buckets (for unit test isolation). */
+export function clearAuthRateLimits(): void {
+  loginFailures.clear();
+  registerAttempts.clear();
+}
 
 // POST /auth/jwt/login
 authRouter.post('/jwt/login', async (c) => {
@@ -22,12 +68,19 @@ authRouter.post('/jwt/login', async (c) => {
       username = String(json.username || json.email || '');
       password = String(json.password || '');
     } catch {
-      // ignore
+      // ignore malformed JSON on login; returns 400 below
     }
   }
 
   if (!username || !password) {
     return c.json({ detail: 'LOGIN_BAD_CREDENTIALS' }, 400);
+  }
+
+  const clientIp = getClientIp(c);
+  const bucketKey = `${clientIp}::${username.trim().toLowerCase()}`;
+  if (pruneTimestamps(loginFailures, bucketKey, LOGIN_WINDOW_MS).length >= MAX_LOGIN_FAILURES) {
+    c.header('Retry-After', String(Math.ceil(LOGIN_WINDOW_MS / 1000)));
+    return c.json({ detail: 'TOO_MANY_LOGIN_ATTEMPTS' }, 429);
   }
 
   const db = getDb();
@@ -36,14 +89,17 @@ authRouter.post('/jwt/login', async (c) => {
     .get(username, username) as { id: number; email: string; hashed_password: string; is_active: number } | undefined;
 
   if (!user || !user.is_active) {
+    recordAttempt(loginFailures, bucketKey, LOGIN_WINDOW_MS);
     return c.json({ detail: 'LOGIN_BAD_CREDENTIALS' }, 400);
   }
 
   const isValid = await verifyPassword(password, user.hashed_password);
   if (!isValid) {
+    recordAttempt(loginFailures, bucketKey, LOGIN_WINDOW_MS);
     return c.json({ detail: 'LOGIN_BAD_CREDENTIALS' }, 400);
   }
 
+  loginFailures.delete(bucketKey);
   const token = await createAccessToken(user.id);
   return c.json({
     access_token: token,
@@ -58,6 +114,12 @@ authRouter.post('/jwt/logout', (c) => {
 
 // POST /auth/register
 authRouter.post('/register', async (c) => {
+  const clientIp = getClientIp(c);
+  if (pruneTimestamps(registerAttempts, clientIp, REGISTER_WINDOW_MS).length >= MAX_REGISTERS_PER_WINDOW) {
+    c.header('Retry-After', String(Math.ceil(REGISTER_WINDOW_MS / 1000)));
+    return c.json({ detail: 'TOO_MANY_REGISTER_ATTEMPTS' }, 429);
+  }
+
   let email = '';
   let password = '';
   let username: string | null = null;
@@ -81,26 +143,36 @@ authRouter.post('/register', async (c) => {
     return c.json({ detail: 'REGISTER_USER_ALREADY_EXISTS' }, 400);
   }
 
-  const hashedPassword = await hashPassword(password);
-  const res = db
-    .prepare(`
-      INSERT INTO users(email, username, hashed_password, is_active, is_superuser, is_verified)
-      VALUES (?, ?, ?, 1, 0, 0)
-    `)
-    .run(email, username, hashedPassword);
+  recordAttempt(registerAttempts, clientIp, REGISTER_WINDOW_MS);
 
-  const newId = Number(res.lastInsertRowid);
-  return c.json(
-    {
-      id: newId,
-      email,
-      username,
-      is_active: true,
-      is_superuser: false,
-      is_verified: false,
-    },
-    201
-  );
+  const hashedPassword = await hashPassword(password);
+  try {
+    const res = db
+      .prepare(`
+        INSERT INTO users(email, username, hashed_password, is_active, is_superuser, is_verified)
+        VALUES (?, ?, ?, 1, 0, 0)
+      `)
+      .run(email, username, hashedPassword);
+
+    const newId = Number(res.lastInsertRowid);
+    return c.json(
+      {
+        id: newId,
+        email,
+        username,
+        is_active: true,
+        is_superuser: false,
+        is_verified: false,
+      },
+      201
+    );
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (/UNIQUE constraint/i.test(msg)) {
+      return c.json({ detail: 'REGISTER_USER_ALREADY_EXISTS' }, 400);
+    }
+    throw err;
+  }
 });
 
 // GET /auth/users/me
@@ -201,39 +273,79 @@ authRouter.get('/users/:identifier', authMiddleware, (c) => {
 // PATCH /auth/users/:id
 authRouter.patch('/users/:id', authMiddleware, async (c) => {
   const currentUser = c.get('user') as AuthUser;
-  const targetId = parseInt(c.req.param('id') || '0', 10);
+  const targetId = Number.parseInt(c.req.param('id') || '0', 10);
+  if (!Number.isSafeInteger(targetId) || targetId <= 0) {
+    return c.json({ detail: 'User not found' }, 404);
+  }
   if (!currentUser.is_superuser && currentUser.id !== targetId) {
     return c.json({ detail: 'Forbidden' }, 403);
   }
 
+  let json: Record<string, unknown>;
+  try {
+    const parsed = await c.req.json();
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return c.json({ detail: 'Invalid request body' }, 400);
+    }
+    json = parsed as Record<string, unknown>;
+  } catch {
+    return c.json({ detail: 'Invalid request body' }, 400);
+  }
+
   const db = getDb();
-  const json = await c.req.json();
-  if (json.password) {
-    const hashed = await hashPassword(String(json.password));
-    db.prepare('UPDATE users SET hashed_password = ? WHERE id = ?').run(hashed, targetId);
+  const targetExists = db.prepare('SELECT id FROM users WHERE id = ?').get(targetId) as { id: number } | undefined;
+  if (!targetExists) {
+    return c.json({ detail: 'User not found' }, 404);
   }
-  if (json.email !== undefined) {
-    db.prepare('UPDATE users SET email = ? WHERE id = ?').run(json.email, targetId);
-  }
-  if (json.username !== undefined) {
-    db.prepare('UPDATE users SET username = ? WHERE id = ?').run(json.username, targetId);
-  }
-  if (currentUser.is_superuser) {
-    if (json.is_active !== undefined) {
-      db.prepare('UPDATE users SET is_active = ? WHERE id = ?').run(json.is_active ? 1 : 0, targetId);
+
+  try {
+    if (json['email'] !== undefined) {
+      const email = String(json['email'] || '').trim().toLowerCase();
+      if (!email) {
+        return c.json({ detail: 'Invalid email' }, 400);
+      }
+      const dupEmail = db.prepare('SELECT id FROM users WHERE email = ? AND id != ?').get(email, targetId);
+      if (dupEmail) {
+        return c.json({ detail: 'EMAIL_ALREADY_EXISTS' }, 400);
+      }
+      db.prepare('UPDATE users SET email = ? WHERE id = ?').run(email, targetId);
     }
-    if (json.is_superuser !== undefined) {
-      db.prepare('UPDATE users SET is_superuser = ? WHERE id = ?').run(json.is_superuser ? 1 : 0, targetId);
+
+    if (json['username'] !== undefined) {
+      const username = json['username'] === null ? null : String(json['username']).trim() || null;
+      if (username) {
+        const dupUser = db.prepare('SELECT id FROM users WHERE username = ? AND id != ?').get(username, targetId);
+        if (dupUser) {
+          return c.json({ detail: 'USERNAME_ALREADY_EXISTS' }, 400);
+        }
+      }
+      db.prepare('UPDATE users SET username = ? WHERE id = ?').run(username, targetId);
     }
+
+    if (json['password']) {
+      const hashed = await hashPassword(String(json['password']));
+      db.prepare('UPDATE users SET hashed_password = ? WHERE id = ?').run(hashed, targetId);
+    }
+
+    if (currentUser.is_superuser) {
+      if (json['is_active'] !== undefined) {
+        db.prepare('UPDATE users SET is_active = ? WHERE id = ?').run(json['is_active'] ? 1 : 0, targetId);
+      }
+      if (json['is_superuser'] !== undefined) {
+        db.prepare('UPDATE users SET is_superuser = ? WHERE id = ?').run(json['is_superuser'] ? 1 : 0, targetId);
+      }
+    }
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (/UNIQUE constraint/i.test(msg)) {
+      return c.json({ detail: 'EMAIL_OR_USERNAME_ALREADY_EXISTS' }, 400);
+    }
+    return c.json({ detail: 'Failed to update user' }, 400);
   }
 
   const updated = db
     .prepare('SELECT id, email, username, is_active, is_superuser, is_verified FROM users WHERE id = ?')
-    .get(targetId) as AuthUser | undefined;
-
-  if (!updated) {
-    return c.json({ detail: 'User not found' }, 404);
-  }
+    .get(targetId) as AuthUser;
 
   return c.json({
     id: updated.id,

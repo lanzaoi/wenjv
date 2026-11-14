@@ -112,7 +112,8 @@ export async function* streamChatEvents(
 
   if (!response.ok) {
     const errorText = await response.text();
-    throw new Error(`Chat upstream error ${response.status}: ${errorText}`);
+    const snippet = errorText.slice(0, 200) + (errorText.length > 200 ? '…' : '');
+    throw new Error(`Chat upstream error ${response.status}: ${snippet}`);
   }
 
   if (!response.body) {

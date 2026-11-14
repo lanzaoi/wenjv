@@ -22,12 +22,12 @@ export async function verifyAccessToken(token: string): Promise<{ userId: number
   });
 
   const sub = payload.sub;
-  if (!sub) {
-    throw new Error('Missing sub in token');
+  if (!sub || !/^\d+$/.test(sub)) {
+    throw new Error('Invalid or missing user ID in token');
   }
 
-  const userId = parseInt(sub, 10);
-  if (Number.isNaN(userId)) {
+  const userId = Number.parseInt(sub, 10);
+  if (!Number.isSafeInteger(userId) || userId <= 0) {
     throw new Error('Invalid user ID in token');
   }
 

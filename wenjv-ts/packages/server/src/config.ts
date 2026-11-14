@@ -1,7 +1,19 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import crypto from 'node:crypto';
+import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
+
+const DISALLOWED_JWT_DEFAULTS = new Set([
+  'YOUR_SECRET_KEY_CHANGE_THIS',
+  'CHANGE_ME_TO_A_RANDOM_32_CHAR_SECRET',
+  'changeme',
+  'secret',
+]);
+
+// Ephemeral random key scoped to test processes when JWT_SECRET is omitted.
+const TEST_EPHEMERAL_SECRET = crypto.randomBytes(32).toString('hex');
 
 function parseEnvFile(filePath: string): Record<string, string> {
   const result: Record<string, string> = {};
@@ -23,12 +35,6 @@ function parseEnvFile(filePath: string): Record<string, string> {
 }
 
 const defaultBaseDir = process.env['WENJV_BASE_DIR'] || process.env['BASE_DIR'] || path.join(os.homedir(), '.config', 'wenjv');
-const envFromFile = parseEnvFile(path.join(defaultBaseDir, 'backend.env'));
-
-const mergedEnv = {
-  ...envFromFile,
-  ...process.env,
-};
 
 const parseEnvBoolean = (defaultValue: boolean) =>
   z.preprocess(
@@ -54,7 +60,7 @@ const ConfigSchema = z.object({
   MODELS_DIR: z.string().default(
     process.env['MODELS_DIR'] || path.resolve(process.cwd(), '..', 'models')
   ),
-  JWT_SECRET: z.string().default('YOUR_SECRET_KEY_CHANGE_THIS'),
+  JWT_SECRET: z.string().min(1),
   JWT_AUDIENCE: z.string().default('fastapi-users:auth'),
   JWT_EXPIRES_IN_SECONDS: z.coerce.number().default(86400),
   ALLOWED_UPLOAD_EXTENSIONS: z.array(z.string()).default([
@@ -102,6 +108,27 @@ export type Config = z.infer<typeof ConfigSchema> & {
 
 export const config: Config = {} as Config;
 
+export function resolveJwtSecret(
+  rawSecret: unknown,
+  isTestRuntime = Boolean(process.env['VITEST']) || process.env['NODE_ENV'] === 'test'
+): string {
+  const candidate = typeof rawSecret === 'string' ? rawSecret.trim() : '';
+  if (candidate && !DISALLOWED_JWT_DEFAULTS.has(candidate)) {
+    return candidate;
+  }
+  if (candidate && DISALLOWED_JWT_DEFAULTS.has(candidate)) {
+    throw new Error(
+      'JWT_SECRET 不能使用公开默认占位符：请在 backend.env 或环境变量中配置随机密钥（例如 openssl rand -hex 32）'
+    );
+  }
+  if (isTestRuntime) {
+    return TEST_EPHEMERAL_SECRET;
+  }
+  throw new Error(
+    'JWT_SECRET 未设置：请在 backend.env 或环境变量中配置随机密钥（例如 openssl rand -hex 32），拒绝使用默认值启动'
+  );
+}
+
 export function loadConfig(overrides?: Partial<z.infer<typeof ConfigSchema>>): Config {
   const effectiveBaseDir =
     overrides?.BASE_DIR ||
@@ -114,11 +141,25 @@ export function loadConfig(overrides?: Partial<z.infer<typeof ConfigSchema>>): C
     ...process.env,
     ...overrides,
   };
-  if (!combined['JWT_SECRET'] && typeof combined['SECRET_KEY'] === 'string' && combined['SECRET_KEY']) {
-    combined['JWT_SECRET'] = combined['SECRET_KEY'];
-  }
+  const explicitOverrideSecret = overrides?.JWT_SECRET;
+  const envJwtSecret = process.env['JWT_SECRET'] || process.env['SECRET_KEY'];
+  const fileJwtSecret = dynamicFileEnv['JWT_SECRET'] || dynamicFileEnv['SECRET_KEY'];
+  const rawJwtSecret =
+    explicitOverrideSecret !== undefined
+      ? explicitOverrideSecret
+      : envJwtSecret || fileJwtSecret;
+  combined['JWT_SECRET'] = resolveJwtSecret(rawJwtSecret);
 
-  const parsed = ConfigSchema.parse(combined);
+  let parsed: z.infer<typeof ConfigSchema>;
+  try {
+    parsed = ConfigSchema.parse(combined);
+  } catch (err: unknown) {
+    if (err instanceof z.ZodError) {
+      const details = err.issues.map((issue) => `${issue.path.join('.') || 'env'}: ${issue.message}`).join('; ');
+      throw new Error(`环境变量配置无效: ${details}`);
+    }
+    throw err;
+  }
 
   const baseDir = parsed.BASE_DIR;
   const resolvedDbPath = parsed.DB_PATH || path.join(baseDir, 'wenjv.db');
@@ -128,11 +169,14 @@ export function loadConfig(overrides?: Partial<z.infer<typeof ConfigSchema>>): C
 
   let resolvedModelsDir = parsed.MODELS_DIR;
   if (!fs.existsSync(resolvedModelsDir)) {
+    const configDir = path.dirname(fileURLToPath(import.meta.url));
     const candidates = [
       path.resolve(process.cwd(), 'models'),
       path.resolve(process.cwd(), '..', 'models'),
       path.resolve(process.cwd(), '..', '..', 'models'),
-      '/home/lanzao/antigravity/jolly-hawking/models',
+      path.resolve(process.cwd(), '..', '..', '..', 'models'),
+      path.resolve(configDir, '..', '..', '..', '..', 'models'),
+      path.resolve(configDir, '..', '..', '..', '..', '..', 'models'),
     ];
     for (const cand of candidates) {
       if (fs.existsSync(cand)) {

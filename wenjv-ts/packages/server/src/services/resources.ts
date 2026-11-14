@@ -12,6 +12,14 @@ import { setEntityTags, getEntityTagsMap, getEntityTags, deleteEntityTags, norma
 
 export type ResourceType = 'file' | 'note' | 'link';
 
+export class ResourceValidationError extends Error {
+  readonly status = 400;
+  constructor(message: string) {
+    super(message);
+    this.name = 'ResourceValidationError';
+  }
+}
+
 export interface ResourceRow {
   id: number;
   user_id: number;
@@ -80,25 +88,35 @@ export function saveUploadFile(params: {
   const filePath = path.join(uploadDir, storedFilename);
   fs.writeFileSync(filePath, params.content);
 
-  const res = db
-    .prepare(`
-      INSERT INTO resources(
-        user_id, type, title, filename, original_filename, file_path, content_type, status
-      )
-      VALUES (?, 'file', ?, ?, ?, ?, ?, 'pending')
-    `)
-    .run(
-      params.userId,
-      params.originalFilename,
-      storedFilename,
-      params.originalFilename,
-      filePath,
-      params.contentType || 'application/octet-stream'
-    );
+  let resourceId: number;
+  try {
+    const res = db
+      .prepare(`
+        INSERT INTO resources(
+          user_id, type, title, filename, original_filename, file_path, content_type, status
+        )
+        VALUES (?, 'file', ?, ?, ?, ?, ?, 'pending')
+      `)
+      .run(
+        params.userId,
+        params.originalFilename,
+        storedFilename,
+        params.originalFilename,
+        filePath,
+        params.contentType || 'application/octet-stream'
+      );
 
-  const resourceId = Number(res.lastInsertRowid);
-  if (params.tags && params.tags.length > 0) {
-    setEntityTags(db, params.userId, 'resource', resourceId, params.tags);
+    resourceId = Number(res.lastInsertRowid);
+    if (params.tags && params.tags.length > 0) {
+      setEntityTags(db, params.userId, 'resource', resourceId, params.tags);
+    }
+  } catch (err) {
+    try {
+      if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+    } catch {
+      // ignore cleanup error
+    }
+    throw err;
   }
 
   enqueueJob({
@@ -258,6 +276,10 @@ export function updateResource(
   const current = getResource(userId, idOrFilename);
   if (!current) return null;
 
+  if (patch.content !== undefined && current.type !== 'note') {
+    throw new ResourceValidationError('Only note resources support content updates');
+  }
+
   const db = getDb();
   const nextTitle = patch.title !== undefined ? patch.title.trim() || current.title : current.title;
   const contentChanged = typeof patch.content === 'string' && patch.content !== current.content_text;
@@ -325,6 +347,11 @@ export async function deleteUserResource(userId: number, idOrFilename: number | 
 
   deleteEntityChunks(db, 'resource', current.id, userId);
   deleteEntityTags(db, userId, 'resource', current.id);
+  db.prepare('DELETE FROM ingestion_jobs WHERE entity_type = ? AND entity_id = ? AND user_id = ?').run(
+    'resource',
+    current.id,
+    userId
+  );
   db.prepare('DELETE FROM resources WHERE id = ? AND user_id = ?').run(current.id, userId);
 
   const textStore = getTextStore();

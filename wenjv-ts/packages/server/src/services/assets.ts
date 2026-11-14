@@ -162,7 +162,10 @@ export function resolveAuthorizedAsset(
     const asset = db.prepare('SELECT * FROM assets WHERE file_path = ? OR file_path = ?').get(relPath, query.path) as
       | AssetRecord
       | undefined;
-    if (asset && asset.user_id !== userId) {
+    if (!asset) {
+      return null;
+    }
+    if (asset.user_id !== userId) {
       throw new AssetSecurityError('Access denied: cannot access another user asset');
     }
 
@@ -180,10 +183,10 @@ export function resolveAuthorizedAsset(
       '.jpeg': 'image/jpeg',
       '.webp': 'image/webp',
     };
-    const mimeType = asset?.mime_type || mimeTypes[ext] || '';
+    const mimeType = asset.mime_type || mimeTypes[ext] || '';
     if (!mimeType) return null;
 
-    return asset ? { absPath, mimeType, asset } : { absPath, mimeType };
+    return { absPath, mimeType, asset };
   }
 
   return null;

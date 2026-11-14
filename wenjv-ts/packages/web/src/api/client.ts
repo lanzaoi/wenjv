@@ -408,7 +408,7 @@ export async function searchDocuments(
   windowSize = 5,
   sourceType: string | null = null,
   tags: string[] | null = null
-): Promise<{ documents: any[]; count: number }> {
+): Promise<{ documents: SearchDocument[]; count: number }> {
   const body: Record<string, unknown> = {
     prompt,
     window_size: windowSize,
@@ -427,7 +427,7 @@ export async function searchByImage(
   file: File,
   windowSize = 5,
   prompt = ''
-): Promise<{ documents: any[]; count: number }> {
+): Promise<{ documents: SearchDocument[]; count: number }> {
   const fd = new FormData();
   fd.append('file', file, file.name);
   fd.append('window_size', String(windowSize));
@@ -445,13 +445,29 @@ export async function listChatModels(token?: string | null): Promise<any> {
   return apiJson('/chat/models', { token });
 }
 
+export type SseEvent =
+  | { type: 'token'; content: string }
+  | { type: 'thinking'; content: string }
+  | { type: 'thinking_id'; thinking_id: string }
+  | { type: 'citations'; citations: SearchDocument['metadata'][] | Array<Record<string, unknown>> }
+  | { type: 'done'; [key: string]: unknown }
+  | { type: 'error'; message?: string; detail?: string; error?: string }
+  | { type: string; [key: string]: unknown };
+
+export interface SearchDocument {
+  id: string;
+  page_content: string;
+  score: number;
+  metadata: Record<string, unknown>;
+}
+
 /**
  * SSE chat. onEvent({type, ...})
  */
 export async function streamChat(
   token: string | null,
   payload: unknown,
-  onEvent: (data: any) => void,
+  onEvent: (data: SseEvent) => void,
   signal?: AbortSignal
 ): Promise<void> {
   const res = await fetch(`${API_BASE}/chat`, {
@@ -488,7 +504,7 @@ export async function streamChatByImage(
   token: string | null,
   file: File,
   fields: Record<string, unknown>,
-  onEvent: (data: any) => void,
+  onEvent: (data: SseEvent) => void,
   signal?: AbortSignal
 ): Promise<void> {
   const fd = new FormData();
@@ -506,7 +522,7 @@ export async function streamChatByImage(
   await readSSE(res, onEvent);
 }
 
-async function readSSE(res: Response, onEvent: (data: any) => void): Promise<void> {
+async function readSSE(res: Response, onEvent: (data: SseEvent) => void): Promise<void> {
   if (!res.body) return;
   const reader = res.body.getReader();
   const dec = new TextDecoder();
@@ -584,7 +600,7 @@ export const wikiApi = {
     pageId: number | string,
     body: unknown,
     token: string | null,
-    onEvent: (data: any) => void,
+    onEvent: (data: SseEvent) => void,
     signal?: AbortSignal
   ): Promise<void> {
     const res = await fetch(`${API_BASE}/wiki/pages/${pageId}/copilot`, {

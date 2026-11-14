@@ -11,7 +11,7 @@ import { searchDocuments, type SearchHit } from '../services/search.js';
 import { streamChatEvents, type ChatImagePart, type ChatMessage } from '../ai/llm-chat.js';
 import { SigLIP2Engine } from '../ai/siglip2.js';
 import { getVisualStore } from '../vector/visual-store.js';
-import { registerAsset, getAssetsByIds } from '../services/assets.js';
+import { registerAsset, getAssetsByIds, resolveAuthorizedAsset } from '../services/assets.js';
 import { config } from '../config.js';
 
 export const chatRouter = new Hono();
@@ -50,43 +50,40 @@ async function resolveImageIdentifier(identifier: string, userId: number): Promi
     }
   }
 
-  // Case 2: Extract ?path=... query parameter from API URL
-  if (candidate.includes('path=')) {
+  // Case 2: Extract ?id= or ?path= query parameter from API URL
+  let assetIdParam: string | undefined;
+  if (candidate.includes('path=') || candidate.includes('id=')) {
     try {
       const parsedUrl = new URL(candidate, 'http://localhost');
+      const idParam = parsedUrl.searchParams.get('id');
       const pathParam = parsedUrl.searchParams.get('path');
+      if (idParam) assetIdParam = idParam;
       if (pathParam) candidate = pathParam;
     } catch {
       // keep candidate as-is
     }
   }
 
-  // Case 3: Local file path within resolvedUploadDir (with session tenant isolation)
-  const uploadRoot = path.resolve(config.resolvedUploadDir);
+  // Case 3: Registered asset owned by current user only (prevents unregistered upload probing)
+  const queries: Array<{ id?: string; path?: string }> = [];
+  if (assetIdParam) {
+    queries.push({ id: assetIdParam });
+  }
   const cleaned = candidate.replace(/^\/+/, '');
-  const tryPaths = [
-    path.isAbsolute(candidate) ? path.resolve(candidate) : path.resolve(uploadRoot, cleaned),
-    path.resolve(uploadRoot, 'mm_assets', cleaned),
-  ];
+  if (cleaned) {
+    queries.push({ path: cleaned });
+    queries.push({ path: `mm_assets/${cleaned}` });
+  }
 
-  for (const target of tryPaths) {
-    if (!target.startsWith(uploadRoot + path.sep) && target !== uploadRoot) {
-      continue;
-    }
-    const rel = path.relative(uploadRoot, target);
-    const parts = rel.split(path.sep);
-    if (parts.length >= 3 && parts[0] === 'mm_assets' && parts[1] === 'sessions') {
-      if (parts[2] !== String(userId)) {
-        continue;
-      }
-    }
+  for (const q of queries) {
     try {
-      if (fs.existsSync(target) && fs.statSync(target).isFile()) {
-        const raw = fs.readFileSync(target);
+      const authorized = resolveAuthorizedAsset(userId, q);
+      if (authorized) {
+        const raw = fs.readFileSync(authorized.absPath);
         return await standardizeImagePart(raw);
       }
     } catch {
-      // ignore invalid image
+      // ignore unauthorized or invalid asset paths
     }
   }
 
@@ -217,6 +214,9 @@ chatRouter.post('/by-image', authMiddleware, async (c) => {
   if (!file || !(file instanceof File)) {
     return c.json({ detail: 'Missing image file' }, 400);
   }
+  if (file.size > config.MAX_UPLOAD_BYTES) {
+    return c.json({ detail: `Image size exceeds limit of ${config.MAX_UPLOAD_BYTES} bytes` }, 413);
+  }
 
   const prompt = typeof body['prompt'] === 'string' ? body['prompt'].trim() : '';
   const model = typeof body['model'] === 'string' ? body['model'] : config.CHAT_MODEL;
@@ -235,6 +235,9 @@ chatRouter.post('/by-image', authMiddleware, async (c) => {
 
   const arrayBuf = await file.arrayBuffer();
   const imgBuffer = Buffer.from(arrayBuf);
+  if (imgBuffer.length > config.MAX_UPLOAD_BYTES) {
+    return c.json({ detail: `Image size exceeds limit of ${config.MAX_UPLOAD_BYTES} bytes` }, 413);
+  }
   const question = prompt || '请详细分析并说明这张图片的内容与关键信息。';
 
   let uploadedImagePart: ChatImagePart | null = null;

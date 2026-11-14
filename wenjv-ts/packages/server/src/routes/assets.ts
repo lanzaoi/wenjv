@@ -1,7 +1,6 @@
 import fs from 'node:fs';
 import { Hono } from 'hono';
-import { authMiddleware, type AuthUser } from '../auth/middleware.js';
-import { verifyAccessToken } from '../auth/jwt.js';
+import { authMiddleware, issueMediaTicket, resolveBearerOrQueryUser, type AuthUser } from '../auth/middleware.js';
 import {
   AssetSecurityError,
   resolveAuthorizedAsset,
@@ -10,26 +9,17 @@ import {
 
 export const assetsRouter = new Hono();
 
+// POST /assets/ticket - issue short-lived (60s) opaque ticket for <img> / media URLs
+assetsRouter.post('/ticket', authMiddleware, (c) => {
+  const user = c.get('user') as AuthUser;
+  const issued = issueMediaTicket(user.id);
+  return c.json({ ticket: issued.ticket, expires_in: issued.expiresIn });
+});
+
 // GET /assets/image?id=... or ?path=...
 assetsRouter.get('/image', async (c) => {
-  let userId: number | null = null;
-  const authHeader = c.req.header('Authorization');
-  let token = c.req.query('token');
-
-  if (authHeader && authHeader.startsWith('Bearer ')) {
-    token = authHeader.slice(7).trim();
-  }
-
-  if (token) {
-    try {
-      const payload = await verifyAccessToken(token);
-      userId = payload.userId;
-    } catch {
-      userId = null;
-    }
-  }
-
-  if (!userId) {
+  const user = await resolveBearerOrQueryUser(c);
+  if (!user) {
     return c.json({ detail: 'Authentication required to view asset' }, 401);
   }
 
@@ -40,7 +30,7 @@ assetsRouter.get('/image', async (c) => {
   }
 
   try {
-    const resolved = resolveAuthorizedAsset(userId, { id, path: rawPath });
+    const resolved = resolveAuthorizedAsset(user.id, { id, path: rawPath });
     if (!resolved) {
       return c.json({ detail: 'Image asset not found' }, 404);
     }
@@ -49,6 +39,7 @@ assetsRouter.get('/image', async (c) => {
       headers: {
         'Content-Type': resolved.mimeType,
         'Cache-Control': 'private, max-age=3600',
+        'X-Content-Type-Options': 'nosniff',
       },
     });
   } catch (err: unknown) {

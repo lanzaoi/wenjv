@@ -66,12 +66,36 @@ export function createApp(): Hono {
   // Initialize SQLite database tables
   getDb();
 
+  // Baseline HTTP security headers (L22)
+  app.use('*', async (c, next) => {
+    await next();
+    c.header('X-Content-Type-Options', 'nosniff');
+    c.header('Referrer-Policy', 'no-referrer');
+    c.header('X-Frame-Options', 'SAMEORIGIN');
+    const ct = c.res.headers.get('Content-Type') || '';
+    if (ct.includes('text/html') && !c.res.headers.has('Content-Security-Policy')) {
+      c.header(
+        'Content-Security-Policy',
+        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; frame-ancestors 'self'"
+      );
+    }
+  });
+
   // Normalize trailing slashes: e.g. /file/?skip=0 -> /file?skip=0
   app.use('*', async (c, next) => {
     const url = new URL(c.req.url);
     if (url.pathname.length > 1 && url.pathname.endsWith('/')) {
       url.pathname = url.pathname.slice(0, -1);
-      return app.fetch(new Request(url.toString(), c.req.raw));
+      const hasBody = c.req.method !== 'GET' && c.req.method !== 'HEAD';
+      const clonedInit: RequestInit & { duplex?: 'half' } = {
+        method: c.req.method,
+        headers: new Headers(c.req.raw.headers),
+      };
+      if (hasBody && c.req.raw.body) {
+        clonedInit.body = c.req.raw.body;
+        clonedInit.duplex = 'half';
+      }
+      return app.fetch(new Request(url.toString(), clonedInit));
     }
     await next();
   });
@@ -90,9 +114,12 @@ export function createApp(): Hono {
 
   // Root & Health
   const webDistDir = resolveWebDistDir();
-  const sendSpaIndex = (c: Context): Response => {
-    const html = fs.readFileSync(path.join(webDistDir!, 'index.html'));
-    return new Response(html, {
+  let cachedSpaIndexHtml: Buffer | null = null;
+  const sendSpaIndex = (_c: Context): Response => {
+    if (!cachedSpaIndexHtml) {
+      cachedSpaIndexHtml = fs.readFileSync(path.join(webDistDir!, 'index.html'));
+    }
+    return new Response(cachedSpaIndexHtml, {
       status: 200,
       headers: {
         'Content-Type': 'text/html; charset=utf-8',
@@ -134,8 +161,7 @@ export function createApp(): Hono {
       if (
         (reqPath === '/' || reqPath === '/admin') &&
         wantsHtmlBrowserNav(c) &&
-        !c.req.header('authorization') &&
-        !c.req.query('token')
+        !c.req.header('authorization')
       ) {
         return sendSpaIndex(c);
       }

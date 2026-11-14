@@ -10,6 +10,7 @@ import {
   inspectLegacyV1Source,
 } from '../services/reingest.js';
 import {
+  ResourceValidationError,
   saveUploadFile,
   saveUserNote,
   submitLink,
@@ -317,18 +318,30 @@ resourcesRouter.get('/:id', authMiddleware, (c) => {
 resourcesRouter.patch('/:id', authMiddleware, async (c) => {
   const user = c.get('user') as AuthUser;
   const idOrName = c.req.param('id') || '';
-  const json = await c.req.json();
-
-  const updated = updateResource(user.id, user.email, idOrName, {
-    title: typeof json.title === 'string' ? json.title : undefined,
-    content: typeof json.content === 'string' ? json.content : undefined,
-    tags: Array.isArray(json.tags) ? json.tags.map(String) : undefined,
-  });
-
-  if (!updated) {
-    return c.json({ detail: 'Resource not found' }, 404);
+  let json: Record<string, unknown>;
+  try {
+    json = (await c.req.json()) as Record<string, unknown>;
+  } catch {
+    return c.json({ detail: 'Invalid JSON body' }, 400);
   }
-  return c.json(updated);
+
+  try {
+    const updated = updateResource(user.id, user.email, idOrName, {
+      title: typeof json['title'] === 'string' ? json['title'] : undefined,
+      content: typeof json['content'] === 'string' ? json['content'] : undefined,
+      tags: Array.isArray(json['tags']) ? json['tags'].map(String) : undefined,
+    });
+
+    if (!updated) {
+      return c.json({ detail: 'Resource not found' }, 404);
+    }
+    return c.json(updated);
+  } catch (err: unknown) {
+    if (err instanceof ResourceValidationError) {
+      return c.json({ detail: err.message }, err.status);
+    }
+    throw err;
+  }
 });
 
 // PUT /resources/:id/tags
@@ -345,7 +358,19 @@ resourcesRouter.put('/:id/tags', authMiddleware, async (c) => {
   return c.json({ tags: updated.tags });
 });
 
-// GET /resources/:id/content (supports Bearer header or ?token= for <img> preview)
+const SAFE_INLINE_CONTENT_TYPES = new Set([
+  'text/plain',
+  'text/markdown',
+  'text/csv',
+  'application/json',
+  'application/pdf',
+  'image/png',
+  'image/jpeg',
+  'image/webp',
+  'image/gif',
+]);
+
+// GET /resources/:id/content (supports Bearer header, ?ticket=, or legacy ?token= for <img> preview)
 resourcesRouter.get('/:id/content', async (c) => {
   const user = await resolveBearerOrQueryUser(c);
   if (!user) {
@@ -363,9 +388,23 @@ resourcesRouter.get('/:id/content', async (c) => {
 
   const buffer = fs.readFileSync(resource.file_path);
   const displayName = resource.original_filename || resource.filename || `${resource.title}.md`;
+  const rawMime = (resource.content_type || '').split(';')[0]?.trim().toLowerCase() || '';
+  const isActiveMarkup =
+    /\.(?:html?|xhtml|svg|xml)$/i.test(displayName) ||
+    /(?:html|svg|xml|javascript)/i.test(rawMime);
+
+  const safeContentType = isActiveMarkup
+    ? 'text/plain; charset=utf-8'
+    : SAFE_INLINE_CONTENT_TYPES.has(rawMime)
+      ? rawMime
+      : 'application/octet-stream';
+  const dispositionType = !isActiveMarkup && SAFE_INLINE_CONTENT_TYPES.has(rawMime) ? 'inline' : 'attachment';
+
   return c.body(buffer, 200, {
-    'Content-Type': resource.content_type || 'application/octet-stream',
-    'Content-Disposition': `inline; filename="${encodeURIComponent(displayName)}"`,
+    'Content-Type': safeContentType,
+    'Content-Disposition': `${dispositionType}; filename="${encodeURIComponent(displayName)}"`,
+    'X-Content-Type-Options': 'nosniff',
+    'Cache-Control': 'private, no-store',
   });
 });
 

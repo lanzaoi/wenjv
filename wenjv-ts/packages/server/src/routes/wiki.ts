@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { Hono } from 'hono';
+import { Hono, type Context } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import sharp from 'sharp';
 import { getDb } from '../db/index.js';
@@ -12,6 +12,9 @@ import { registerAsset } from '../services/assets.js';
 import { config } from '../config.js';
 import {
   ConflictError,
+  NotFoundError,
+  ValidationError,
+  escapeLike,
   getWikiTree,
   getWikiPage,
   createWikiPage,
@@ -27,6 +30,14 @@ import {
 
 export const wikiRouter = new Hono();
 
+function wikiErrorResponse(c: Context, err: unknown): Response {
+  if (err instanceof ConflictError || err instanceof NotFoundError || err instanceof ValidationError) {
+    return c.json({ detail: err.message }, err.status);
+  }
+  const msg = err instanceof Error ? err.message : String(err);
+  return c.json({ detail: msg }, 400);
+}
+
 // GET /wiki/tree
 wikiRouter.get('/tree', authMiddleware, (c) => {
   const user = c.get('user') as AuthUser;
@@ -37,17 +48,29 @@ wikiRouter.get('/tree', authMiddleware, (c) => {
 // POST /wiki/pages
 wikiRouter.post('/pages', authMiddleware, async (c) => {
   const user = c.get('user') as AuthUser;
-  const json = await c.req.json();
+  let json: Record<string, unknown>;
+  try {
+    json = (await c.req.json()) as Record<string, unknown>;
+  } catch {
+    return c.json({ detail: 'Invalid JSON body' }, 400);
+  }
 
-  const title = String(json.title || '').trim();
+  const title = String(json['title'] || '').trim();
   if (!title) {
     return c.json({ detail: 'Missing title' }, 400);
   }
 
-  const content = String(json.content || '');
-  const parentId = json.parent_id !== undefined && json.parent_id !== null ? Number(json.parent_id) : null;
-  const icon = json.icon ? String(json.icon) : undefined;
-  const tags = Array.isArray(json.tags) ? json.tags : undefined;
+  const content = String(json['content'] || '');
+  let parentId: number | null = null;
+  if (json['parent_id'] !== undefined && json['parent_id'] !== null && json['parent_id'] !== '') {
+    const parsedParent = Number(json['parent_id']);
+    if (!Number.isSafeInteger(parsedParent) || parsedParent <= 0) {
+      return c.json({ detail: 'Invalid parent_id' }, 400);
+    }
+    parentId = parsedParent;
+  }
+  const icon = json['icon'] ? String(json['icon']) : undefined;
+  const tags = Array.isArray(json['tags']) ? json['tags'] : undefined;
 
   try {
     const page = createWikiPage({
@@ -61,8 +84,7 @@ wikiRouter.post('/pages', authMiddleware, async (c) => {
     });
     return c.json(page, 201);
   } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-    return c.json({ detail: msg }, 400);
+    return wikiErrorResponse(c, err);
   }
 });
 
@@ -100,11 +122,7 @@ wikiRouter.put('/pages/:id', authMiddleware, async (c) => {
     });
     return c.json(page);
   } catch (err: unknown) {
-    if (err instanceof ConflictError) {
-      return c.json({ detail: err.message }, 409);
-    }
-    const msg = err instanceof Error ? err.message : String(err);
-    return c.json({ detail: msg }, 400);
+    return wikiErrorResponse(c, err);
   }
 });
 
@@ -133,8 +151,7 @@ wikiRouter.post('/pages/:id/move', authMiddleware, async (c) => {
     const page = moveWikiPage(user.id, user.email, id, targetParentId, sortOrder);
     return c.json(page);
   } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-    return c.json({ detail: msg }, 400);
+    return wikiErrorResponse(c, err);
   }
 });
 
@@ -156,8 +173,7 @@ wikiRouter.post('/pages/:id/rollback/:rev', authMiddleware, (c) => {
     const page = rollbackWikiPage(user.id, user.email, id, rev);
     return c.json(page);
   } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-    return c.json({ detail: msg }, 400);
+    return wikiErrorResponse(c, err);
   }
 });
 
@@ -239,20 +255,63 @@ wikiRouter.post('/pages/:id/assets', authMiddleware, async (c) => {
   });
 });
 
-function computeRevisionDiff(
+const MAX_DIFF_DP_CELLS = 1_500_000;
+
+export function computeRevisionDiff(
   contentA: string,
   contentB: string
-): Array<{ type: 'add' | 'del' | 'same'; content: string }> {
+): { lines: Array<{ type: 'add' | 'del' | 'same'; content: string }>; truncated: boolean } {
   const linesA = contentA.split('\n');
   const linesB = contentB.split('\n');
 
-  const m = linesA.length;
-  const n = linesB.length;
-  const dp: number[][] = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
+  let prefixLen = 0;
+  while (prefixLen < linesA.length && prefixLen < linesB.length && linesA[prefixLen] === linesB[prefixLen]) {
+    prefixLen++;
+  }
 
+  let suffixLen = 0;
+  while (
+    suffixLen < linesA.length - prefixLen &&
+    suffixLen < linesB.length - prefixLen &&
+    linesA[linesA.length - 1 - suffixLen] === linesB[linesB.length - 1 - suffixLen]
+  ) {
+    suffixLen++;
+  }
+
+  const prefixLines: Array<{ type: 'add' | 'del' | 'same'; content: string }> = linesA
+    .slice(0, prefixLen)
+    .map((line) => ({ type: 'same', content: line }));
+  const suffixLines: Array<{ type: 'add' | 'del' | 'same'; content: string }> =
+    suffixLen > 0
+      ? linesA.slice(linesA.length - suffixLen).map((line) => ({ type: 'same', content: line }))
+      : [];
+
+  const midA = linesA.slice(prefixLen, linesA.length - suffixLen);
+  const midB = linesB.slice(prefixLen, linesB.length - suffixLen);
+  const m = midA.length;
+  const n = midB.length;
+
+  if (m === 0 && n === 0) {
+    return { lines: prefixLines.concat(suffixLines), truncated: false };
+  }
+
+  if (m * n > MAX_DIFF_DP_CELLS) {
+    // Bounded linear fallback avoids O(m*n) memory exhaustion on massive rewrites.
+    const cap = 500;
+    const midLines: Array<{ type: 'add' | 'del' | 'same'; content: string }> = [
+      ...midA.slice(0, cap).map((line) => ({ type: 'del' as const, content: line })),
+      ...midB.slice(0, cap).map((line) => ({ type: 'add' as const, content: line })),
+    ];
+    return {
+      lines: [...prefixLines, ...midLines, ...suffixLines],
+      truncated: true,
+    };
+  }
+
+  const dp: number[][] = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
   for (let i = 0; i < m; i++) {
     for (let j = 0; j < n; j++) {
-      if (linesA[i] === linesB[j]) {
+      if (midA[i] === midB[j]) {
         dp[i + 1]![j + 1] = dp[i]![j]! + 1;
       } else {
         dp[i + 1]![j + 1] = Math.max(dp[i + 1]![j]!, dp[i]![j + 1]!);
@@ -264,20 +323,23 @@ function computeRevisionDiff(
   let j = n;
   const reversed: Array<{ type: 'add' | 'del' | 'same'; content: string }> = [];
   while (i > 0 || j > 0) {
-    if (i > 0 && j > 0 && linesA[i - 1] === linesB[j - 1]) {
-      reversed.push({ type: 'same', content: linesA[i - 1]! });
+    if (i > 0 && j > 0 && midA[i - 1] === midB[j - 1]) {
+      reversed.push({ type: 'same', content: midA[i - 1]! });
       i--;
       j--;
     } else if (j > 0 && (i === 0 || dp[i]![j - 1]! >= dp[i - 1]![j]!)) {
-      reversed.push({ type: 'add', content: linesB[j - 1]! });
+      reversed.push({ type: 'add', content: midB[j - 1]! });
       j--;
     } else if (i > 0) {
-      reversed.push({ type: 'del', content: linesA[i - 1]! });
+      reversed.push({ type: 'del', content: midA[i - 1]! });
       i--;
     }
   }
 
-  return reversed.reverse();
+  return {
+    lines: [...prefixLines, ...reversed.reverse(), ...suffixLines],
+    truncated: false,
+  };
 }
 
 // GET /wiki/pages/:id/diff
@@ -304,11 +366,12 @@ wikiRouter.get('/pages/:id/diff', authMiddleware, (c) => {
     return c.json({ detail: 'Specified revisions not found' }, 404);
   }
 
-  const diffLines = computeRevisionDiff(revA.content || '', revB.content || '');
+  const { lines, truncated } = computeRevisionDiff(revA.content || '', revB.content || '');
   return c.json({
     from_rev: fromRev,
     to_rev: toRev,
-    diff_lines: diffLines,
+    diff_lines: lines,
+    truncated,
   });
 });
 
@@ -453,10 +516,13 @@ wikiRouter.get('/search', authMiddleware, (c) => {
   }> = [];
   const seenIds = new Set<number>();
 
-  // 1. Search title prefix/fuzzy
+  // 1. Search title prefix/fuzzy (escaped LIKE special chars)
+  const escapedQ = `%${escapeLike(q)}%`;
   const titleMatches = db
-    .prepare('SELECT id, title, slug, path, icon, content FROM wiki_pages WHERE user_id = ? AND title LIKE ? ORDER BY updated_at DESC LIMIT 15')
-    .all(user.id, `%${q}%`) as Array<{ id: number; title: string; slug: string; path: string; icon: string | null; content: string }>;
+    .prepare(
+      "SELECT id, title, slug, path, icon, content FROM wiki_pages WHERE user_id = ? AND title LIKE ? ESCAPE '\\' ORDER BY updated_at DESC LIMIT 15"
+    )
+    .all(user.id, escapedQ) as Array<{ id: number; title: string; slug: string; path: string; icon: string | null; content: string }>;
 
   for (const p of titleMatches) {
     seenIds.add(p.id);

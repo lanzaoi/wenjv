@@ -73,6 +73,21 @@ const ConfigSchema = z.object({
   RERANK_MODEL: z.string().default('BAAI/bge-reranker-v2-m3'),
   RERANK_MAX_LENGTH: z.coerce.number().default(256),
   RERANK_MICRO_BATCH_SIZE: z.coerce.number().default(4),
+
+  OCR_ENABLED: z
+    .preprocess(
+      (v) =>
+        v === undefined
+          ? undefined
+          : typeof v === 'string'
+            ? !['false', '0', 'no', 'off', ''].includes(v.trim().toLowerCase())
+            : Boolean(v),
+      z.boolean().default(true)
+    ),
+  OCR_SIDECAR_URL: z.string().default('http://127.0.0.1:8788'),
+  OCR_TIMEOUT_MS: z.coerce.number().default(60000),
+  OCR_MIN_CHARS: z.coerce.number().default(40),
+  OCR_IMAGE_MODE: z.enum(['auto', 'general', 'formula']).default('auto'),
 });
 
 export type Config = z.infer<typeof ConfigSchema> & {

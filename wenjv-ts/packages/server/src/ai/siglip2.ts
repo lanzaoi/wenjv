@@ -5,6 +5,14 @@ import { Tokenizer } from '@huggingface/tokenizers';
 import sharp from 'sharp';
 import { config } from '../config.js';
 
+const VISION_MODEL_CANDIDATES = [
+  'vision_model_q4.onnx',
+  'vision_model_q4f16.onnx',
+  'vision_model.onnx',
+  'vision_model_fp16.onnx',
+  'vision_model_int8.onnx',
+] as const;
+
 export class SigLIP2Engine {
   private textSession: ort.InferenceSession | null = null;
   private visionSession: ort.InferenceSession | null = null;
@@ -16,12 +24,15 @@ export class SigLIP2Engine {
     this.modelDir = modelDir || path.join(config.resolvedModelsDir, 'siglip2_onnx');
   }
 
+  public isVisionSupported(): boolean {
+    return this.visionSupported;
+  }
+
   public async init(): Promise<void> {
     if (this.textSession && this.tokenizer) {
       return;
     }
     const textModelPath = path.join(this.modelDir, 'onnx', 'text_model_int8.onnx');
-    const visionModelPath = path.join(this.modelDir, 'onnx', 'vision_model_int8.onnx');
     const tokJsonPath = path.join(this.modelDir, 'tokenizer.json');
     const tokCfgPath = path.join(this.modelDir, 'tokenizer_config.json');
 
@@ -45,13 +56,16 @@ export class SigLIP2Engine {
 
     this.textSession = await ort.InferenceSession.create(textModelPath, opts);
 
-    if (fs.existsSync(visionModelPath)) {
+    for (const candidate of VISION_MODEL_CANDIDATES) {
+      const visionModelPath = path.join(this.modelDir, 'onnx', candidate);
+      if (!fs.existsSync(visionModelPath)) continue;
       try {
         this.visionSession = await ort.InferenceSession.create(visionModelPath, opts);
         this.visionSupported = true;
-      } catch {
-        // ConvInteger in quantized vision model may not be supported by CPU provider
-        this.visionSupported = false;
+        break;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.warn(`[SigLIP2] Vision model ${candidate} failed to load on CPU EP: ${msg}`);
       }
     }
   }
@@ -98,6 +112,8 @@ export class SigLIP2Engine {
 
     try {
       const resized = await sharp(imageBuffer)
+        .removeAlpha()
+        .toColorspace('srgb')
         .resize(224, 224, { fit: 'fill', kernel: 'linear' })
         .raw()
         .toBuffer();
@@ -129,7 +145,9 @@ export class SigLIP2Engine {
       for (const v of vec) normSq += v * v;
       const norm = Math.sqrt(normSq) || 1e-12;
       return vec.map((v) => v / norm);
-    } catch {
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(`[SigLIP2] embedImage failed: ${msg}`);
       return new Array(768).fill(0);
     }
   }

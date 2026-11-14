@@ -170,6 +170,25 @@ export async function deleteResource(token: string | null, resourceId: string | 
   return apiJson(`/resources/${resourceId}`, { method: 'DELETE', token });
 }
 
+export async function getResourceDetail(
+  token: string | null,
+  resourceId: string | number
+): Promise<ResourceItem & { content?: string }> {
+  return apiJson(`/resources/${resourceId}`, { token });
+}
+
+export async function reingestResource(
+  token: string | null,
+  resourceId: string | number,
+  ocrMode: 'auto' | 'general' | 'formula' = 'auto'
+): Promise<{ status: string; resource_id: number; job_id: number }> {
+  return apiJson(`/resources/${resourceId}/reingest`, {
+    method: 'POST',
+    token,
+    body: { ocr_mode: ocrMode },
+  });
+}
+
 export interface LegacyImportPreview {
   isValidLegacyDb: boolean;
   files: number;

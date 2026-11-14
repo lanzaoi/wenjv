@@ -159,4 +159,41 @@ describe('Multimodal Assets & Visual Search (Schema v2)', () => {
       expect(data.documents[0]?.metadata.image_url).toContain('/api/assets/image?id=vis_doc_1');
     }
   });
+
+  it('computes non-zero normalized SigLIP2 image vectors (including RGBA PNGs) and distinguishes colors', async () => {
+    const { SigLIP2Engine } = await import('../src/ai/siglip2.js');
+    const engine = new SigLIP2Engine();
+    await engine.init();
+    expect(engine.isVisionSupported()).toBe(true);
+
+    const redRgba = await sharp({
+      create: { width: 64, height: 64, channels: 4, background: { r: 230, g: 20, b: 20, alpha: 1 } },
+    })
+      .png()
+      .toBuffer();
+    const blueRgb = await sharp({
+      create: { width: 64, height: 64, channels: 3, background: { r: 20, g: 40, b: 230 } },
+    })
+      .png()
+      .toBuffer();
+
+    const vRed = await engine.embedImage(redRgba);
+    const vBlue = await engine.embedImage(blueRgb);
+
+    expect(vRed.length).toBe(768);
+    expect(vBlue.length).toBe(768);
+
+    const normRed = Math.sqrt(vRed.reduce((s, x) => s + x * x, 0));
+    const normBlue = Math.sqrt(vBlue.reduce((s, x) => s + x * x, 0));
+    expect(normRed).toBeGreaterThan(0.99);
+    expect(normBlue).toBeGreaterThan(0.99);
+
+    const cosBetweenImages = vRed.reduce((s, x, i) => s + x * (vBlue[i] ?? 0), 0);
+    expect(cosBetweenImages).toBeLessThan(0.98);
+
+    const qRed = await engine.embedText('solid red color square');
+    const simRedToRed = vRed.reduce((s, x, i) => s + x * (qRed[i] ?? 0), 0);
+    const simBlueToRed = vBlue.reduce((s, x, i) => s + x * (qRed[i] ?? 0), 0);
+    expect(simRedToRed).toBeGreaterThan(simBlueToRed);
+  });
 });

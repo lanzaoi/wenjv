@@ -20,6 +20,7 @@ import {
   deleteUserResource,
   type ResourceType,
 } from '../services/resources.js';
+import { enqueueJob, markEntityPending } from '../services/jobs.js';
 
 export const resourcesRouter = new Hono();
 
@@ -373,4 +374,38 @@ resourcesRouter.delete('/:id', authMiddleware, async (c) => {
     return c.json({ detail: 'Resource not found' }, 404);
   }
   return c.json({ status: 'deleted' });
+});
+
+// POST /resources/:id/reingest
+resourcesRouter.post('/:id/reingest', authMiddleware, async (c) => {
+  const user = c.get('user') as AuthUser;
+  const idOrName = c.req.param('id') || '';
+  const resource = getResource(user.id, idOrName);
+  if (!resource) {
+    return c.json({ detail: 'Resource not found' }, 404);
+  }
+
+  let ocrMode: string | undefined;
+  try {
+    const body = (await c.req.json()) as Record<string, unknown>;
+    if (body['ocr_mode'] === 'auto' || body['ocr_mode'] === 'general' || body['ocr_mode'] === 'formula') {
+      ocrMode = body['ocr_mode'];
+    }
+  } catch {
+    // optional body
+  }
+
+  markEntityPending('resource', resource.id);
+  const jobId = enqueueJob({
+    entity_type: 'resource',
+    entity_id: resource.id,
+    user_id: user.id,
+    user_email: user.email,
+    payload: {
+      reason: 'manual_reingest',
+      ...(ocrMode ? { ocr_mode: ocrMode } : {}),
+    },
+  });
+
+  return c.json({ status: 'pending', resource_id: resource.id, job_id: jobId }, 202);
 });

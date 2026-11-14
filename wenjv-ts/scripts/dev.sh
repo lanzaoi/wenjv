@@ -35,6 +35,16 @@ cleanup() {
 }
 trap cleanup SIGINT SIGTERM EXIT
 
+# 启动本地 CPU OCR Sidecar (8788，可选)
+if [[ "${OCR_ENABLED:-true}" != "false" && -x "$ROOT/sidecar/.venv/bin/python" ]]; then
+  echo "  OCR:  http://127.0.0.1:${OCR_PORT:-8788} (PP-OCRv5 Mobile + Pix2Text)"
+  (
+    cd "$ROOT/sidecar"
+    exec "$ROOT/sidecar/.venv/bin/python" ocr_server.py
+  ) &
+  pids+=($!)
+fi
+
 # 启动 TS 后端
 (
   cd "$ROOT/packages/server"

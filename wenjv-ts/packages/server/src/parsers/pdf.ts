@@ -12,7 +12,8 @@ export interface ParsedPdfResult {
 }
 
 export async function parsePdf(buffer: Buffer | Uint8Array): Promise<ParsedPdfResult> {
-  const result = await extractText(buffer);
+  const bytes = Buffer.isBuffer(buffer) ? new Uint8Array(buffer) : buffer;
+  const result = await extractText(bytes);
   const totalPages = result.totalPages || (Array.isArray(result.text) ? result.text.length : 1);
   const rawPages: string[] = Array.isArray(result.text) ? result.text : [String(result.text || '')];
 

@@ -227,8 +227,31 @@
                 <span v-if="!selectedResource.tags?.length" class="muted" style="font-size: 12px">无标签</span>
               </div>
             </div>
+            <div v-if="detailLoading" class="muted" style="font-size: 12px">加载提取文本中…</div>
+            <div v-else-if="detailContent" class="detail-kv">
+              <span>已提取 / 索引文本</span>
+              <pre class="detail-content-box">{{ detailContent }}</pre>
+            </div>
+            <div v-if="reingestMessage" class="detail-info-box">{{ reingestMessage }}</div>
           </div>
           <footer class="detail-foot">
+            <button
+              v-if="selectedResource.type === 'file'"
+              type="button"
+              class="btn btn-secondary btn-sm"
+              :disabled="reingesting"
+              @click="triggerReingest(selectedResource, 'formula')"
+            >
+              {{ reingesting ? '入队中…' : '公式 OCR 重索引' }}
+            </button>
+            <button
+              type="button"
+              class="btn btn-secondary btn-sm"
+              :disabled="reingesting"
+              @click="triggerReingest(selectedResource, 'auto')"
+            >
+              重新索引
+            </button>
             <button type="button" class="btn btn-secondary btn-sm" @click="askDeleteResource(selectedResource)">
               删除资源
             </button>
@@ -263,6 +286,8 @@ import { ref, onMounted, onActivated, onDeactivated, onBeforeUnmount, computed, 
 import { storeToRefs } from 'pinia'
 import { useRouter } from 'vue-router'
 import { useLibraryStore } from '../stores/library'
+import { useAuthStore } from '../stores/auth'
+import { getResourceDetail, reingestResource } from '../api/client.js'
 import Icon from '../components/Icon.vue'
 import StatusDot from '../components/StatusDot.vue'
 import ImportModal from '../components/ImportModal.vue'
@@ -283,6 +308,7 @@ const typeFilters = [
 ]
 
 const router = useRouter()
+const auth = useAuthStore()
 const library = useLibraryStore()
 const {
   loading,
@@ -309,6 +335,10 @@ const tagInputRef = ref(null)
 
 const pendingDeleteItem = ref(null)
 const deleting = ref(false)
+const detailContent = ref('')
+const detailLoading = ref(false)
+const reingesting = ref(false)
+const reingestMessage = ref('')
 
 const hasAny = computed(() => resources.value.length > 0)
 const visibleSections = computed(() => {
@@ -380,12 +410,44 @@ async function saveTags(item) {
   }
 }
 
-function openDetail(item) {
+async function openDetail(item) {
   library.selectedResourceId = item.id
+  detailContent.value = ''
+  reingestMessage.value = ''
+  detailLoading.value = true
+  try {
+    const detail = await getResourceDetail(auth.token, item.id)
+    if (library.selectedResourceId === item.id) {
+      detailContent.value = detail?.content || ''
+    }
+  } catch {
+    detailContent.value = ''
+  } finally {
+    detailLoading.value = false
+  }
+}
+
+async function triggerReingest(item, mode = 'auto') {
+  if (!item?.id || reingesting.value) return
+  reingesting.value = true
+  reingestMessage.value = ''
+  try {
+    await reingestResource(auth.token, item.id, mode)
+    reingestMessage.value = mode === 'formula'
+      ? '已加入公式 + 文本 OCR 队列，稍后自动更新索引。'
+      : '已加入重新索引队列，稍后自动更新。'
+    await reload({ silent: true })
+  } catch (err) {
+    reingestMessage.value = '入队失败: ' + (err?.message || err)
+  } finally {
+    reingesting.value = false
+  }
 }
 
 function closeDetail() {
   library.selectedResourceId = null
+  detailContent.value = ''
+  reingestMessage.value = ''
 }
 
 function askDeleteResource(item) {
@@ -873,7 +935,9 @@ li:hover {
 }
 .lib-detail-dialog,
 .lib-confirm-dialog {
-  width: min(480px, 94vw);
+  width: min(560px, 94vw);
+  max-height: 86vh;
+  overflow-y: auto;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 14px;
@@ -941,10 +1005,33 @@ li:hover {
 }
 .detail-foot {
   display: flex;
+  flex-wrap: wrap;
   justify-content: flex-end;
   gap: 8px;
   padding-top: 10px;
   border-top: 1px solid var(--border);
+}
+.detail-content-box {
+  margin: 4px 0 0;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 220px;
+  overflow-y: auto;
+}
+.detail-info-box {
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: #f0f9ff;
+  border: 1px solid rgba(2, 132, 199, 0.25);
+  color: #0369a1;
+  font-size: 12.5px;
 }
 .btn-danger-solid {
   background: var(--danger);

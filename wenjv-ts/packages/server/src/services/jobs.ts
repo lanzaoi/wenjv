@@ -6,6 +6,8 @@ import { getDb } from '../db/index.js';
 import { config } from '../config.js';
 import { getEmbedder } from '../ai/bge-m3.js';
 import { getTextStore } from '../vector/text-store.js';
+import { getVisualStore } from '../vector/visual-store.js';
+import { getOcrClient, type OcrMode } from '../ai/ocr-client.js';
 import {
   replaceEntityChunks,
   deleteEntityChunks,
@@ -266,12 +268,39 @@ export async function executeJob(job: IngestionJobRecord): Promise<void> {
         const buffer = fs.readFileSync(filePath);
         const ext = path.extname(filename).toLowerCase().replace('.', '');
 
+        let ocrModeOverride: OcrMode = config.OCR_IMAGE_MODE;
+        if (job.payload) {
+          try {
+            const parsedPayload = JSON.parse(job.payload) as Record<string, unknown>;
+            if (
+              parsedPayload['ocr_mode'] === 'auto' ||
+              parsedPayload['ocr_mode'] === 'general' ||
+              parsedPayload['ocr_mode'] === 'formula'
+            ) {
+              ocrModeOverride = parsedPayload['ocr_mode'];
+            }
+          } catch {
+            // ignore malformed payload
+          }
+        }
+
         if (IMAGE_EXTENSIONS.has(ext)) {
           const stdBytes = await sharp(buffer)
             .rotate()
             .resize(1280, 1280, { fit: 'inside', withoutEnlargement: true })
             .jpeg({ quality: 85 })
             .toBuffer();
+
+          db.prepare("DELETE FROM assets WHERE owner_type = 'resource' AND owner_id = ? AND user_id = ?").run(
+            String(job.entity_id),
+            job.user_id
+          );
+          await getVisualStore().deleteByOwner('resource', job.entity_id, job.user_id);
+
+          const ocr = await getOcrClient().recognizeImage(buffer, filename, ocrModeOverride);
+          const captionText = ocr?.text
+            ? `${title}\n${ocr.text.slice(0, 600)}`
+            : title;
 
           const relPath = path.relative(config.resolvedUploadDir, filePath).replace(/\\/g, '/');
           await registerAsset({
@@ -283,12 +312,35 @@ export async function executeJob(job: IngestionJobRecord): Promise<void> {
             absPath: filePath,
             mimeType: String(resRow['content_type'] || 'image/jpeg'),
             size: buffer.length,
-            caption: title,
+            caption: captionText,
             bytesForVisualIndex: stdBytes,
           });
-          content = `图片资源: ${title} (${filename})`;
+
+          if (ocr?.text) {
+            content = `图片资源: ${title} (${filename})\n\n[OCR 提取 (${ocr.engine})]\n${ocr.text}`;
+            db.prepare('UPDATE resources SET content_text = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(
+              ocr.text,
+              job.entity_id
+            );
+          } else {
+            content = `图片资源: ${title} (${filename})`;
+          }
         } else if (ext === 'pdf') {
           content = (await parsePdf(buffer)).text;
+          if (content.trim().length < config.OCR_MIN_CHARS) {
+            const pdfOcr = await getOcrClient().recognizePdf(
+              buffer,
+              filename,
+              ocrModeOverride === 'formula' ? 'formula' : 'general'
+            );
+            if (pdfOcr?.text) {
+              content = pdfOcr.text;
+              db.prepare('UPDATE resources SET content_text = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(
+                pdfOcr.text,
+                job.entity_id
+              );
+            }
+          }
         } else if (ext === 'docx') {
           content = (await parseDocx(buffer)).text;
         } else if (ext === 'pptx') {

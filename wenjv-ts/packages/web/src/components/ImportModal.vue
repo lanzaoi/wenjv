@@ -264,7 +264,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import {
   detectLegacyImport,
   importLegacyBundle,
@@ -533,6 +533,20 @@ function closeModal() {
   if (uploadingBatch.value || importingLegacy.value) return;
   emit('close');
 }
+
+function onGlobalKeydown(e: KeyboardEvent) {
+  if (e.key === 'Escape' && props.show) {
+    closeModal();
+  }
+}
+
+onMounted(() => {
+  window.addEventListener('keydown', onGlobalKeydown);
+});
+
+onBeforeUnmount(() => {
+  window.removeEventListener('keydown', onGlobalKeydown);
+});
 </script>
 
 <style scoped>

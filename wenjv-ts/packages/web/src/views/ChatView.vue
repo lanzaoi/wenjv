@@ -725,11 +725,22 @@ async function doImageIngest() {
   }
 }
 
+function extractWikiTitleFromMsg(content: string): string {
+  const withoutThink = content
+    .replace(/<think>[\s\S]*?<\/think>/gi, '')
+    .replace(/^💭\s*\*?思考过程\*?：?.*$/gm, '')
+  const lines = withoutThink
+    .split('\n')
+    .map((line) => line.replace(/^[#\s*>•-]+/, '').trim())
+    .filter((line) => line && line !== '---' && !/^\*?思考过程\*?：?$/.test(line))
+  const first = lines[0] || ''
+  return first.slice(0, 40) || '知识总结'
+}
+
 function saveMsgToWiki(content: string) {
   if (!content) return
-  const firstLine = (content.trim().split('\n')[0] || '').replace(/^[#\s*>-]+/, '').trim()
   wikiSaveContent.value = content
-  wikiSaveTitle.value = firstLine.slice(0, 40) || '知识总结'
+  wikiSaveTitle.value = extractWikiTitleFromMsg(content)
   wikiSaveErr.value = ''
   wikiSavedPage.value = null
   showWikiSaveModal.value = true

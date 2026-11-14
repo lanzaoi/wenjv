@@ -97,8 +97,23 @@
         <path d="M4.5 8.5A2 2 0 0 1 6.5 6.5h3.2l1.6 1.8H17.5a2 2 0 0 1 2 2V17a2 2 0 0 1-2 2h-11a2 2 0 0 1-2-2V8.5Z" />
       </template>
       <template v-else-if="name === 'book'">
-        <path d="M5.5 5.5A2 2 0 0 1 7.5 3.5H18v15H7.5a2 2 0 0 0 0 4H18" />
-        <path d="M7.5 18.5h10.5" />
+        <path d="M12 6.5c-1.8-1.3-4.2-1.8-7-1.5a1 1 0 0 0-.9 1v12a1 1 0 0 0 1.1 1c2.6-.3 4.9.2 6.8 1.5" />
+        <path d="M12 6.5c1.8-1.3 4.2-1.8 7-1.5a1 1 0 0 1 .9 1v12a1 1 0 0 1-1.1 1c-2.6-.3-4.9.2-6.8 1.5" />
+        <path d="M12 6.5v14" />
+      </template>
+      <template v-else-if="name === 'pin'">
+        <path d="M7.5 4.5h9a1.5 1.5 0 0 1 1.5 1.5v14l-6-3.8-6 3.8V6a1.5 1.5 0 0 1 1.5-1.5Z" />
+      </template>
+      <template v-else-if="name === 'thought'">
+        <path d="M17.5 17H9a4.5 4.5 0 0 1-.8-8.9A5.5 5.5 0 0 1 18.7 9.7 3.7 3.7 0 0 1 17.5 17Z" />
+        <circle cx="7" cy="19.8" r="1" />
+      </template>
+      <template v-else-if="name === 'arrow-left'">
+        <path d="M19 12H7m0 0 4-4m-4 4 4 4" />
+      </template>
+      <template v-else-if="name === 'copy'">
+        <rect x="9" y="9" width="10.5" height="10.5" rx="2" />
+        <path d="M5.5 15H5a1.5 1.5 0 0 1-1.5-1.5v-8A1.5 1.5 0 0 1 5 4h8a1.5 1.5 0 0 1 1.5 1.5V6" />
       </template>
       <template v-else-if="name === 'globe'">
         <circle cx="12" cy="12" r="7.5" />

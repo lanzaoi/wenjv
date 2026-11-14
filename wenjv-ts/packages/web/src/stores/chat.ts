@@ -3,6 +3,7 @@ import { defineStore } from 'pinia';
 export interface ChatMessage {
   role: 'user' | 'assistant' | 'system';
   content: string;
+  thinking?: string;
   mediaUrl?: string;
   imageUrl?: string;
   images?: string[];
@@ -38,6 +39,7 @@ export interface ChatState {
   selectedTags: string[];
   streaming: boolean;
   streamText: string;
+  streamThinking: string;
   busy: boolean;
 }
 
@@ -56,6 +58,7 @@ export const useChatStore = defineStore('chat', {
     selectedTags: [],
     streaming: false,
     streamText: '',
+    streamThinking: '',
     busy: false,
   }),
   getters: {
@@ -97,18 +100,28 @@ export const useChatStore = defineStore('chat', {
     appendStream(token: string) {
       this.streamText += token || '';
     },
+    appendThinking(token: string) {
+      this.streamThinking += token || '';
+    },
     beginStream() {
       this.streaming = true;
       this.streamText = '';
+      this.streamThinking = '';
       this.busy = true;
     },
     endStream(commit = true) {
       if (commit) {
         const text = this.streamText || '（无输出）';
-        this.messages.push({ role: 'assistant', content: text });
+        const thinking = this.streamThinking.trim();
+        this.messages.push({
+          role: 'assistant',
+          content: text,
+          ...(thinking ? { thinking } : {}),
+        });
       }
       this.streaming = false;
       this.streamText = '';
+      this.streamThinking = '';
       this.busy = false;
     },
     resetSession() {
@@ -118,6 +131,7 @@ export const useChatStore = defineStore('chat', {
       this.prompt = '';
       this.streaming = false;
       this.streamText = '';
+      this.streamThinking = '';
       this.busy = false;
     },
     clearAll() {

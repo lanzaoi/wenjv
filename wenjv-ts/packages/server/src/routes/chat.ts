@@ -8,7 +8,7 @@ import { authMiddleware, type AuthUser } from '../auth/middleware.js';
 import { getDb } from '../db/index.js';
 import type { ChunkResourceType } from '../db/chunks.js';
 import { searchDocuments, type SearchHit } from '../services/search.js';
-import { streamChatCompletions, type ChatImagePart, type ChatMessage } from '../ai/llm-chat.js';
+import { streamChatEvents, type ChatImagePart, type ChatMessage } from '../ai/llm-chat.js';
 import { SigLIP2Engine } from '../ai/siglip2.js';
 import { getVisualStore } from '../vector/visual-store.js';
 import { registerAsset, getAssetsByIds } from '../services/assets.js';
@@ -333,9 +333,9 @@ chatRouter.post('/by-image', authMiddleware, async (c) => {
     }
 
     try {
-      for await (const token of streamChatCompletions({ model, messages, signal: c.req.raw.signal })) {
+      for await (const ev of streamChatEvents({ model, messages, signal: c.req.raw.signal })) {
         await stream.writeSSE({
-          data: JSON.stringify({ type: 'token', content: token }),
+          data: JSON.stringify({ type: ev.kind, content: ev.text }),
         });
       }
     } catch (err: unknown) {
@@ -458,9 +458,9 @@ chatRouter.post('/', authMiddleware, async (c) => {
     }
 
     try {
-      for await (const token of streamChatCompletions({ model, messages, signal: c.req.raw.signal })) {
+      for await (const ev of streamChatEvents({ model, messages, signal: c.req.raw.signal })) {
         await stream.writeSSE({
-          data: JSON.stringify({ type: 'token', content: token }),
+          data: JSON.stringify({ type: ev.kind, content: ev.text }),
         });
       }
     } catch (err: unknown) {

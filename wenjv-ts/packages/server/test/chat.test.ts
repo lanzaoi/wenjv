@@ -171,12 +171,17 @@ describe('Chat Routes (S5)', () => {
     expect(events[0]?.['type']).toBe('citations');
     expect(events[events.length - 1]?.['type']).toBe('done');
 
+    const thinkingText = events
+      .filter((e) => e['type'] === 'thinking')
+      .map((e) => String(e['content'] ?? ''))
+      .join('');
     const tokenText = events
       .filter((e) => e['type'] === 'token')
       .map((e) => String(e['content'] ?? ''))
       .join('');
-    expect(tokenText).toContain('思考过程');
-    expect(tokenText).toContain('分析中');
+    expect(thinkingText).toContain('分析中');
+    expect(tokenText).not.toContain('分析中');
+    expect(tokenText).not.toContain('思考过程');
     expect(tokenText).toContain('测试回答');
 
     // Verify upstream OpenAI request received multipart image_url on current turn
@@ -231,5 +236,41 @@ describe('Chat Routes (S5)', () => {
     expect(Array.isArray(lastMsg.content)).toBe(true);
     const parts = lastMsg.content as Array<{ type: string; image_url?: { url: string } }>;
     expect(parts.some((p) => p.type === 'image_url' && p.image_url?.url.startsWith('data:image/'))).toBe(true);
+  });
+
+  it('extracts inline <think>...</think> blocks split across SSE chunks into thinking events', async () => {
+    const tagServer = http.createServer((_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' });
+      const chunks = ['<thi', 'nk>内部推理', '轨迹</t', 'hink>\n\n最终结论'];
+      for (const c of chunks) {
+        res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: c } }] })}\n\n`);
+      }
+      res.write('data: [DONE]\n\n');
+      res.end();
+    });
+    await new Promise<void>((resolve) => tagServer.listen(0, '127.0.0.1', () => resolve()));
+    const addr = tagServer.address();
+    const port = typeof addr === 'object' && addr ? addr.port : 0;
+    try {
+      const { streamChatEvents, streamChatCompletions } = await import('../src/ai/llm-chat.js');
+      loadConfig({ CHAT_API_BASE: `http://127.0.0.1:${port}/v2`, CHAT_API_KEY: 'k' });
+
+      const events: Array<{ kind: string; text: string }> = [];
+      for await (const ev of streamChatEvents({ messages: [{ role: 'user', content: 'hi' }] })) {
+        events.push(ev);
+      }
+      const thinking = events.filter((e) => e.kind === 'thinking').map((e) => e.text).join('');
+      const tokens = events.filter((e) => e.kind === 'token').map((e) => e.text).join('');
+      expect(thinking).toBe('内部推理轨迹');
+      expect(tokens).toBe('最终结论');
+
+      let plain = '';
+      for await (const tok of streamChatCompletions({ messages: [{ role: 'user', content: 'hi' }] })) {
+        plain += tok;
+      }
+      expect(plain).toBe('最终结论');
+    } finally {
+      await new Promise<void>((resolve, reject) => tagServer.close((e) => (e ? reject(e) : resolve())));
+    }
   });
 });

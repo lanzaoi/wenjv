@@ -228,12 +228,23 @@
             <img v-if="m.imageUrl" :src="m.imageUrl" class="msg-img" alt="" />
             <div v-if="m.role === 'assistant'" class="msg-actions">
               <button
+                v-if="m.thinking"
                 type="button"
-                class="save-to-wiki-btn"
+                class="msg-action-btn msg-thinking-btn"
+                @click="openThinkingPage(i)"
+                title="在二级页面查看完整思考过程"
+              >
+                <Icon name="thought" :size="13" />
+                <span>思考过程 ({{ formatThinkingLength(m.thinking) }})</span>
+              </button>
+              <button
+                type="button"
+                class="msg-action-btn save-to-wiki-btn"
                 @click="saveMsgToWiki(m.content)"
                 title="将此回答沉淀为 Wiki 知识库页面"
               >
-                📌 沉淀至 Wiki
+                <Icon name="pin" :size="13" />
+                <span>沉淀至 Wiki</span>
               </button>
             </div>
           </div>
@@ -244,7 +255,22 @@
             <Icon name="bot" :size="16" />
           </div>
           <div class="bubble">
-            <div class="content">{{ streamText }}<span class="caret" /></div>
+            <div v-if="streamThinking && !streamText" class="thinking-live-pill">
+              <span class="spinner" />
+              <span>正在深度思考 ({{ formatThinkingLength(streamThinking) }})</span>
+            </div>
+            <div v-if="streamText || !streamThinking" class="content">{{ streamText }}<span class="caret" /></div>
+            <div v-if="streamThinking" class="msg-actions">
+              <button
+                type="button"
+                class="msg-action-btn msg-thinking-btn"
+                @click="openThinkingPage('live')"
+                title="在二级页面查看实时思考过程"
+              >
+                <Icon name="thought" :size="13" />
+                <span>{{ streamText ? '思考过程' : '查看实时思考' }} ({{ formatThinkingLength(streamThinking) }})</span>
+              </button>
+            </div>
           </div>
         </div>
       </div>
@@ -441,6 +467,7 @@ import { useAuthStore } from '../stores/auth'
 import { useChatStore, type CitationItem } from '../stores/chat'
 import FileDrop from '../components/FileDrop.vue'
 import Icon from '../components/Icon.vue'
+import { formatThinkingLength, renderMd } from '../utils/chat-format'
 import {
   uploadFile,
   createNote,
@@ -493,6 +520,7 @@ const {
   selectedTags,
   streaming,
   streamText,
+  streamThinking,
   busy,
 } = storeToRefs(chat)
 
@@ -845,44 +873,8 @@ function safeWindowSize(): number {
   return Math.min(50, Math.floor(n))
 }
 
-function renderMd(text: string): string {
-  if (!text) return ''
-  const codeBlocks: string[] = []
-  let processed = String(text).replace(/```([a-zA-Z0-9_-]*)\n([\s\S]*?)```/g, (_match, lang, code) => {
-    const id = `__CODE_BLOCK_${codeBlocks.length}__`
-    const escCode = String(code)
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-    codeBlocks.push(`<pre class="code-block"><code class="language-${lang || 'text'}">${escCode}</code></pre>`)
-    return id
-  })
-
-  processed = processed
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-
-  processed = processed.replace(/^### (.+)$/gm, '<h4 class="md-h">$1</h4>')
-  processed = processed.replace(/^## (.+)$/gm, '<h3 class="md-h">$1</h3>')
-  processed = processed.replace(/^# (.+)$/gm, '<h2 class="md-h">$1</h2>')
-  processed = processed.replace(/^&gt; (.+)$/gm, '<blockquote class="md-quote">$1</blockquote>')
-  processed = processed.replace(/^[-*] (.+)$/gm, '<div class="md-li">• $1</div>')
-  processed = processed.replace(/`([^`\n]+)`/g, '<code class="inline-code">$1</code>')
-  processed = processed.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
-  processed = processed.replace(/\*([^*]+)\*/g, '<em>$1</em>')
-  processed = processed.replace(
-    /\[([^\]]+)\]\(((?:https?:\/\/|\/)[^\s)]+)\)/g,
-    '<a href="$2" target="_blank" rel="noopener noreferrer" class="chat-link">$1</a>'
-  )
-  processed = processed.replace(/\n/g, '<br>')
-  processed = processed.replace(/(<\/(?:h[234]|blockquote|div)>)<br>/g, '$1')
-
-  codeBlocks.forEach((block, idx) => {
-    processed = processed.replace(`__CODE_BLOCK_${idx}__`, block)
-  })
-
-  return processed
+function openThinkingPage(id: number | 'live') {
+  router.push({ name: 'thinking', params: { id: String(id) } })
 }
 
 async function sendText() {
@@ -1048,7 +1040,8 @@ function getCitationImageUrl(c: string | Partial<CitationItem> | Record<string, 
 }
 
 function onSse(ev: SseEvent) {
-  if (ev.type === 'token') chat.appendStream(ev.content || '')
+  if (ev.type === 'thinking') chat.appendThinking(ev.content || '')
+  else if (ev.type === 'token') chat.appendStream(ev.content || '')
   else if (ev.type === 'citations') {
     chat.setCitations(
       (ev.citations || []).map((c: Record<string, unknown>) => {
@@ -1826,6 +1819,48 @@ function onSse(ev: SseEvent) {
   justify-content: flex-end;
   gap: 8px;
   margin-top: 14px;
+}
+
+.msg-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.msg-action-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border, #e5e5ea);
+  background: var(--bg-secondary, rgba(120, 120, 128, 0.06));
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.4;
+  cursor: pointer;
+  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+.msg-action-btn:hover {
+  background: rgba(0, 113, 227, 0.08);
+  border-color: rgba(0, 113, 227, 0.25);
+  color: var(--accent);
+}
+
+.thinking-live-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border-radius: 10px;
+  background: var(--bg-secondary, rgba(120, 120, 128, 0.08));
+  border: 1px solid var(--border, #e5e5ea);
+  color: var(--text-secondary);
+  font-size: 13px;
 }
 </style>
 

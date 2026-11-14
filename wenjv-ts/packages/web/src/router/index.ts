@@ -20,6 +20,7 @@ const routes: RouteRecordRaw[] = [
     meta: { requiresAuth: true },
     children: [
       { path: '', name: 'chat', component: () => import('../views/ChatView.vue') },
+      { path: 'thinking/:id', name: 'thinking', component: () => import('../views/ThinkingView.vue') },
       { path: 'library', name: 'library', component: () => import('../views/LibraryView.vue') },
       { path: 'wiki/:id?', name: 'wiki', component: () => import('../views/WikiView.vue') },
       {

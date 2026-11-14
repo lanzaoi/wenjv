@@ -17,6 +17,11 @@ export interface ChatCompletionOptions {
   signal?: AbortSignal;
 }
 
+export interface ChatStreamEvent {
+  kind: 'thinking' | 'token';
+  text: string;
+}
+
 type OpenAIMessageContent =
   | string
   | Array<
@@ -36,9 +41,23 @@ function toDataUrl(img: string | ChatImagePart): string | null {
   return img.data.startsWith('data:image/') ? img.data : `data:${mime};base64,${img.data}`;
 }
 
-export async function* streamChatCompletions(
+const THINK_OPEN = '<think>';
+const THINK_CLOSE = '</think>';
+
+function trailingPrefixLen(text: string, target: string): number {
+  const maxCheck = Math.min(text.length, target.length - 1);
+  for (let len = maxCheck; len > 0; len--) {
+    if (text.endsWith(target.slice(0, len))) {
+      return len;
+    }
+  }
+  return 0;
+}
+
+/** Stream chat completion chunks split into structured thinking vs answer tokens. */
+export async function* streamChatEvents(
   options: ChatCompletionOptions
-): AsyncGenerator<string, void, unknown> {
+): AsyncGenerator<ChatStreamEvent, void, unknown> {
   const apiKey = config.CHAT_API_KEY;
   const apiBase = config.CHAT_API_BASE.replace(/\/+$/, '');
   const model = options.model || config.CHAT_MODEL;
@@ -103,7 +122,49 @@ export async function* streamChatCompletions(
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
-  let inReasoning = false;
+  let inThinkTag = false;
+  let tagCarry = '';
+  let emittedAnswerToken = false;
+
+  const processContentChunk = function* (chunk: string): Generator<ChatStreamEvent> {
+    let working = tagCarry + chunk;
+    tagCarry = '';
+
+    while (working.length > 0) {
+      const target = inThinkTag ? THINK_CLOSE : THINK_OPEN;
+      const idx = working.indexOf(target);
+      if (idx !== -1) {
+        const before = working.slice(0, idx);
+        if (before) {
+          if (inThinkTag) {
+            yield { kind: 'thinking', text: before };
+          } else {
+            emittedAnswerToken = true;
+            yield { kind: 'token', text: before };
+          }
+        }
+        working = working.slice(idx + target.length);
+        inThinkTag = !inThinkTag;
+        if (!inThinkTag && !emittedAnswerToken) {
+          working = working.replace(/^\n+/, '');
+        }
+        continue;
+      }
+
+      const hold = trailingPrefixLen(working, target);
+      const emitPart = hold > 0 ? working.slice(0, working.length - hold) : working;
+      tagCarry = hold > 0 ? working.slice(working.length - hold) : '';
+      if (emitPart) {
+        if (inThinkTag) {
+          yield { kind: 'thinking', text: emitPart };
+        } else {
+          emittedAnswerToken = true;
+          yield { kind: 'token', text: emitPart };
+        }
+      }
+      break;
+    }
+  };
 
   try {
     while (true) {
@@ -118,7 +179,13 @@ export async function* streamChatCompletions(
         const line = rawLine.trim();
         if (!line || !line.startsWith('data: ')) continue;
         const dataStr = line.slice(6).trim();
-        if (dataStr === '[DONE]') return;
+        if (dataStr === '[DONE]') {
+          if (tagCarry) {
+            yield { kind: inThinkTag ? 'thinking' : 'token', text: tagCarry };
+            tagCarry = '';
+          }
+          return;
+        }
 
         try {
           const parsed = JSON.parse(dataStr);
@@ -128,26 +195,32 @@ export async function* streamChatCompletions(
           if (!delta) continue;
 
           if (delta.reasoning_content) {
-            if (!inReasoning) {
-              inReasoning = true;
-              yield '> 💭 *思考过程*：\n> ';
-            }
-            yield delta.reasoning_content.replace(/\n/g, '\n> ');
+            yield { kind: 'thinking', text: delta.reasoning_content };
           }
 
           if (delta.content) {
-            if (inReasoning) {
-              inReasoning = false;
-              yield '\n\n';
-            }
-            yield delta.content;
+            yield* processContentChunk(delta.content);
           }
         } catch {
           // ignore incomplete json chunk
         }
       }
     }
+    if (tagCarry) {
+      yield { kind: inThinkTag ? 'thinking' : 'token', text: tagCarry };
+      tagCarry = '';
+    }
   } finally {
     reader.releaseLock();
+  }
+}
+
+export async function* streamChatCompletions(
+  options: ChatCompletionOptions
+): AsyncGenerator<string, void, unknown> {
+  for await (const ev of streamChatEvents(options)) {
+    if (ev.kind === 'token') {
+      yield ev.text;
+    }
   }
 }

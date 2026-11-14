@@ -163,6 +163,46 @@ test.describe('wenjv single-port E2E flows', () => {
     await expect(page.locator('.cites')).toBeVisible();
     await expect(page.locator('.cites')).toContainText('光合作用');
 
+    // 8b. Verify hidden thinking stream + secondary /thinking/:id view + fixed nav/pin icons
+    await expect(page.getByRole('link', { name: 'Wiki' }).locator('svg path')).toHaveCount(3);
+    await page.route('**/chat', async (route) => {
+      if (route.request().method() !== 'POST') {
+        await route.continue();
+        return;
+      }
+      const sseBody = [
+        `data: ${JSON.stringify({ type: 'citations', citations: [] })}\n\n`,
+        `data: ${JSON.stringify({ type: 'thinking', content: '先核对光合作用光反应路径' })}\n\n`,
+        `data: ${JSON.stringify({ type: 'token', content: '最终答案：ATP 与 NADPH' })}\n\n`,
+        `data: ${JSON.stringify({ type: 'done' })}\n\n`,
+      ].join('');
+      await route.fulfill({
+        status: 200,
+        headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' },
+        body: sseBody,
+      });
+    });
+
+    await page.getByRole('button', { name: '自由对话' }).click();
+    await composerPrompt.fill('请分析光合作用能量转换');
+    await composerPrompt.press('Enter');
+    const lastAssistantBubble = page.locator('.msg.assistant').last();
+    await expect(lastAssistantBubble.locator('.content')).toContainText('最终答案：ATP 与 NADPH');
+    await expect(lastAssistantBubble.locator('.content')).not.toContainText('先核对光合作用光反应路径');
+    await expect(lastAssistantBubble.locator('.save-to-wiki-btn svg')).toHaveCount(1);
+
+    const thinkingBtn = lastAssistantBubble.locator('.msg-thinking-btn');
+    await expect(thinkingBtn).toBeVisible();
+    await thinkingBtn.click();
+    await expect(page).toHaveURL(/\/thinking\/\d+/);
+    await expect(page.locator('.reasoning-content')).toContainText('先核对光合作用光反应路径');
+    await expect(page.locator('.context-text')).toContainText('请分析光合作用能量转换');
+
+    await page.getByRole('button', { name: '返回对话' }).click();
+    await expect(page).toHaveURL(/\/$/);
+    await expect(page.locator('.msg.assistant .content').last()).toContainText('最终答案：ATP 与 NADPH');
+    await page.unroute('**/chat');
+
     // 9. Logout, register superuser account, promote in SQLite, re-login, and inspect /admin
     await page.getByRole('button', { name: '退出' }).click();
     await expect(page).toHaveURL(/\/login/);

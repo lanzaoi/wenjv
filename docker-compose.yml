@@ -1,20 +1,41 @@
 services:
-  api:
+  wenjv-sidecar:
     build:
       context: .
       dockerfile: Dockerfile
-    image: wenjv-api:latest
+      target: sidecar
+    image: wenjv-sidecar:latest
     ports:
-      - "8000:8000"
-    # IMPORTANT: Never hardcode SECRET_KEY or API_KEY in this file or in the Dockerfile.
-    # Config is read from the mounted dir's backend.env (not tracked in Git).
-    #
-    # Host path (left side):
-    #   - Default: ~/.config/wenjv  (Windows: %USERPROFILE%\.config\wenjv)
-    #   - Legacy data still under inquisitive? set:
-    #       WENJV_CONFIG_DIR=%USERPROFILE%\.config\inquisitive
-    #     or migrate files into ~/.config/wenjv first.
-    # Container path is always /home/appuser/.config/wenjv (matches app primary name).
+      - "8788:8788"
     volumes:
-      - ${WENJV_CONFIG_DIR:-${USERPROFILE:-${HOME:-~}}/.config/wenjv}:/home/appuser/.config/wenjv
+      # Cache downloaded RapidOCR / Pix2Text ONNX weights across restarts
+      - sidecar-cache:/home/appuser/.cache
+      - sidecar-pix2text:/home/appuser/.pix2text
     restart: unless-stopped
+
+  wenjv-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: server
+    image: wenjv-server:latest
+    depends_on:
+      - wenjv-sidecar
+    ports:
+      - "8787:8787"
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "8787"
+      WENJV_BASE_DIR: "/data/wenjv"
+      MODELS_DIR: "/app/models"
+      OCR_SIDECAR_URL: "http://wenjv-sidecar:8788"
+    volumes:
+      # Persists wenjv.db, lance_db/, uploads/, wiki_vault/, and reads backend.env
+      - ${WENJV_CONFIG_DIR:-${HOME:-~}/.config/wenjv}:/data/wenjv
+      # Read-only mount of local ONNX embedding / reranker / SigLIP2 models
+      - ./models:/app/models:ro
+    restart: unless-stopped
+
+volumes:
+  sidecar-cache:
+  sidecar-pix2text:

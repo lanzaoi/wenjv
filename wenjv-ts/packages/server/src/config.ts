@@ -30,6 +30,17 @@ const mergedEnv = {
   ...process.env,
 };
 
+const parseEnvBoolean = (defaultValue: boolean) =>
+  z.preprocess(
+    (v) =>
+      v === undefined
+        ? undefined
+        : typeof v === 'string'
+          ? !['false', '0', 'no', 'off', ''].includes(v.trim().toLowerCase())
+          : Boolean(v),
+    z.boolean().default(defaultValue)
+  );
+
 const ConfigSchema = z.object({
   PORT: z.coerce.number().default(8787),
   HOST: z.string().default('0.0.0.0'),
@@ -66,7 +77,7 @@ const ConfigSchema = z.object({
   EMBEDDING_API_BASE: z.string().default('https://api.siliconflow.cn/v1'),
   EMBEDDINGS_MODEL: z.string().default('BAAI/bge-m3'),
 
-  RERANK_ENABLED: z.coerce.boolean().default(true),
+  RERANK_ENABLED: parseEnvBoolean(true),
   RERANK_PROVIDER: z.string().default('local_onnx'),
   RERANK_API_KEY: z.string().default(''),
   RERANK_API_BASE: z.string().default('https://api.siliconflow.cn/v1'),
@@ -74,16 +85,7 @@ const ConfigSchema = z.object({
   RERANK_MAX_LENGTH: z.coerce.number().default(256),
   RERANK_MICRO_BATCH_SIZE: z.coerce.number().default(4),
 
-  OCR_ENABLED: z
-    .preprocess(
-      (v) =>
-        v === undefined
-          ? undefined
-          : typeof v === 'string'
-            ? !['false', '0', 'no', 'off', ''].includes(v.trim().toLowerCase())
-            : Boolean(v),
-      z.boolean().default(true)
-    ),
+  OCR_ENABLED: parseEnvBoolean(true),
   OCR_SIDECAR_URL: z.string().default('http://127.0.0.1:8788'),
   OCR_TIMEOUT_MS: z.coerce.number().default(60000),
   OCR_MIN_CHARS: z.coerce.number().default(40),

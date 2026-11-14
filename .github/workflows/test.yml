@@ -1,12 +1,55 @@
 name: Test
+
 on: [push, pull_request]
+
 jobs:
-  test:
+  verify-ts:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: wenjv-ts
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'pnpm'
+          cache-dependency-path: wenjv-ts/pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Check no-stubs
+        run: pnpm run no-stubs
+
+      - name: TypeScript typecheck
+        run: pnpm run typecheck
+
+      - name: Build @wenjv/web SPA
+        run: pnpm --filter @wenjv/web build
+
+      # Run model-independent unit & route tests in CI.
+      # Full ONNX/E2E suites (golden, search, visual, ocr, reingest, files-and-ingest, sidecar, playwright)
+      # require local model weights under ./models and run locally via `pnpm run verify:all`.
+      - name: Run @wenjv/server model-independent tests
+        run: >
+          pnpm --filter @wenjv/server exec vitest run
+          test/auth.test.ts
+          test/config.test.ts
+          test/markdown-web.test.ts
+          test/chat.test.ts
+          test/wiki.test.ts
+          test/links-and-admin.test.ts
+
+  sidecar-syntax:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
-      - run: pip install -r requirements.txt
-      - run: pytest tests/ -q
+          python-version: '3.12'
+      - name: Check OCR Sidecar Python syntax
+        run: python -m py_compile wenjv-ts/sidecar/ocr_server.py wenjv-ts/sidecar/test_ocr_server.py

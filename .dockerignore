@@ -1,8 +1,12 @@
-# Git
+# Git & OS
 .git
 .gitignore
+.DS_Store
 
-# Virtual environments and Python caches
+# Legacy Python runtime & caches
+backend/
+web/
+.venv/
 venv/
 __pycache__/
 *.pyc
@@ -13,7 +17,18 @@ __pycache__/
 .ruff_cache/
 *.egg-info/
 
-# Local database and data directories
+# Local Node / Python virtualenvs & build artifacts inside wenjv-ts
+wenjv-ts/node_modules/
+wenjv-ts/**/node_modules/
+wenjv-ts/**/dist/
+wenjv-ts/sidecar/.venv/
+wenjv-ts/.data/
+wenjv-ts/playwright-report/
+wenjv-ts/test-results/
+wenjv-ts/coverage/
+
+# Local DB, data, and secrets (mounted via runtime volumes instead)
+models/
 *.db
 *.sqlite
 *.sqlite3
@@ -23,12 +38,12 @@ milvus_data.db
 uploads/
 logs/
 data/
-
-# Test/eval outputs and AI assistant artifacts
 eval/results/
 eval/msmarco_data/
 .hermes/
 .gemini/
 .agents/
+.agent/
 .env
 *.env
+!wenjv-ts/.env.example
